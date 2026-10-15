@@ -1,0 +1,19 @@
+## Interface: 16001
+## Title: Looking For Work
+## Notes: Saves every profession recipe and finds which guild members (online or offline) can craft it
+## Author: Claude
+## Version: 1.0.0
+## SavedVariables: LookingForWorkDB
+## IconTexture: Interface\Icons\INV_Misc_Note_01
+## AddonCompartmentFunc: LookingForWork_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: LookingForWork_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: LookingForWork_OnAddonCompartmentLeave
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+Libs\AceComm-3.0\AceComm-3.0.xml
+Libs\AceSerializer-3.0\AceSerializer-3.0.xml
+
+Core.lua
+Comm.lua
+UI.lua
