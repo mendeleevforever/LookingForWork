@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.1.0"
+LFW.VERSION = "1.2.0"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -462,6 +462,178 @@ end
 function ns.HasTooltipSearch(id)
     local c = tipCache[id]
     return c ~= nil and not c.incomplete
+end
+
+-------------------------------------------------------------------------------
+-- Auction prices from Auctionator (same sources as AH Lookup)
+--   1) Auctionator.API.v1.GetAuctionPriceByItemID / GetVendorPriceByItemID
+--   2) fallback: Auctionator's saved price table, entry .m (latest minimum price)
+-------------------------------------------------------------------------------
+local AH_CUT = 0.95        -- the auction house keeps 5% of the sale price
+ns.AH_CUT = AH_CUT
+local CALLER = "LookingForWork"
+
+local function API()
+    return Auctionator and Auctionator.API and Auctionator.API.v1
+end
+
+function ns.AuctionatorLoaded()
+    if API() then return true end
+    return type(AUCTIONATOR_PRICE_DATABASE) == "table"
+end
+
+-- A realm price table maps "12345" to entries like { m = 1234, h = {...}, l = {...} }
+local function IsPriceTable(t)
+    if type(t) ~= "table" then return false end
+    local checked = 0
+    for _, v in pairs(t) do
+        if type(v) == "table" and (v.m or v.h or v.l) then return true end
+        checked = checked + 1
+        if checked >= 25 then break end
+    end
+    return false
+end
+
+local priceDB, priceDBTime = nil, 0
+local function FindPriceDB()
+    if Auctionator and type(Auctionator.Database) == "table" and IsPriceTable(Auctionator.Database.db) then
+        return Auctionator.Database.db
+    end
+    local root = AUCTIONATOR_PRICE_DATABASE
+    if type(root) ~= "table" then return nil end
+    local realm   = GetRealmName() or ""
+    local nrealm  = (GetNormalizedRealmName and GetNormalizedRealmName()) or (realm:gsub("[%s%-]", ""))
+    local faction = UnitFactionGroup("player") or ""
+    local candidates = { realm .. " " .. faction, nrealm .. " " .. faction, realm, nrealm, realm .. "-" .. faction }
+    if Auctionator and Auctionator.Variables and Auctionator.Variables.GetConnectedRealmRoot then
+        local ok, r = pcall(Auctionator.Variables.GetConnectedRealmRoot)
+        if ok and type(r) == "string" then table.insert(candidates, 1, r) end
+    end
+    for _, key in ipairs(candidates) do
+        if IsPriceTable(root[key]) then return root[key] end
+    end
+    local lrealm = realm:lower()
+    for key, t in pairs(root) do
+        if type(key) == "string" and lrealm ~= "" and key:lower():find(lrealm, 1, true) and IsPriceTable(t) then
+            return t
+        end
+    end
+    return nil
+end
+
+local function PriceDB()
+    if not priceDB and GetTime() - priceDBTime > 30 then
+        priceDB, priceDBTime = FindPriceDB(), GetTime()
+    end
+    return priceDB
+end
+
+function ns.ResetPriceCache()
+    priceDB, priceDBTime = nil, 0
+end
+
+local function Positive(n) return type(n) == "number" and n > 0 and n or nil end
+
+-- Latest auction price of one item, in copper (nil if Auctionator hasn't seen it)
+function ns.AuctionPrice(itemID)
+    if not itemID then return nil end
+    local api = API()
+    if api and api.GetAuctionPriceByItemID then
+        local ok, price = pcall(api.GetAuctionPriceByItemID, CALLER, itemID)
+        if ok and Positive(price) then return price end
+    end
+    local db = PriceDB()
+    if db then
+        local v = db[tostring(itemID)] or db[itemID]
+        if type(v) == "table" and Positive(v.m) then return v.m end
+    end
+    return nil
+end
+
+-- What a vendor sells it for (Auctionator remembers vendor prices it has seen)
+function ns.VendorPrice(itemID)
+    local api = API()
+    if itemID and api and api.GetVendorPriceByItemID then
+        local ok, price = pcall(api.GetVendorPriceByItemID, CALLER, itemID)
+        if ok and Positive(price) then return price end
+    end
+    return nil
+end
+
+-- Days since Auctionator last saw the item on the auction house
+function ns.AuctionAge(itemID)
+    local api = API()
+    if itemID and api and api.GetAuctionAgeByItemID then
+        local ok, age = pcall(api.GetAuctionAgeByItemID, CALLER, itemID)
+        if ok and type(age) == "number" then return age end
+    end
+    return nil
+end
+
+-- Cheapest way to get one reagent: vendor or auction house
+function ns.ReagentPrice(itemID)
+    local vendor, auction = ns.VendorPrice(itemID), ns.AuctionPrice(itemID)
+    if vendor and (not auction or vendor <= auction) then return vendor, "vendor" end
+    if auction then return auction, "auction" end
+    return nil
+end
+
+-- Cost to craft a recipe and profit from selling what it makes
+--   { cost, parts = { {itemID, qty, unit, total, source} }, missing = {itemID...},
+--     outItem, outQty, outPrice, sale, profit, oldest }
+function ns.CraftEconomics(e)
+    if not e or not e.r then return nil end
+    local info = { cost = 0, parts = {}, missing = {} }
+    for _, r in ipairs(e.r) do
+        local unit, source = ns.ReagentPrice(r[1])
+        local part = { itemID = r[1], qty = r[2], unit = unit, source = source }
+        if unit then
+            part.total = unit * r[2]
+            info.cost = info.cost + part.total
+            if source == "auction" then
+                local age = ns.AuctionAge(r[1])
+                if age and (not info.oldest or age > info.oldest) then info.oldest = age end
+            end
+        else
+            info.missing[#info.missing + 1] = r[1]
+        end
+        info.parts[#info.parts + 1] = part
+    end
+    info.cost = math.floor(info.cost + 0.5)
+    if e.o then
+        info.outItem = e.o
+        info.outQty = (e.qmin and e.qmax) and ((e.qmin + e.qmax) / 2) or 1
+        info.outPrice = ns.AuctionPrice(e.o)
+        if info.outPrice then
+            info.sale = info.outPrice * info.outQty
+            info.profit = math.floor(info.sale * AH_CUT - info.cost + 0.5)
+            local age = ns.AuctionAge(e.o)
+            if age and (not info.oldest or age > info.oldest) then info.oldest = age end
+        end
+    end
+    return info
+end
+
+-- Money with coin icons, like the game's own price displays
+function ns.Coins(copper)
+    if type(copper) ~= "number" then return "|cff9d9d9d—|r" end
+    local negative = copper < 0
+    copper = math.floor(math.abs(copper) + 0.5)
+    local text
+    if GetCoinTextureString then
+        local ok, s = pcall(GetCoinTextureString, copper, 12)
+        if ok and type(s) == "string" then text = s end
+    end
+    if not text then
+        local g, sv, c = math.floor(copper / 10000), math.floor((copper % 10000) / 100), copper % 100
+        local parts = {}
+        if g > 0 then parts[#parts + 1] = ("|cffffd700%dg|r"):format(g) end
+        if sv > 0 then parts[#parts + 1] = ("|cffc0c0c0%ds|r"):format(sv) end
+        if c > 0 or #parts == 0 then parts[#parts + 1] = ("|cffb87333%dc|r"):format(c) end
+        text = table.concat(parts, " ")
+    end
+    if negative then return "|cffff4040-|r" .. text end
+    return text
 end
 
 -------------------------------------------------------------------------------
@@ -1161,6 +1333,12 @@ end
 
 function handlers.PLAYER_REGEN_ENABLED()
     if LFW.FlushCombatQueue then LFW:FlushCombatQueue() end
+end
+
+-- New auction scan data: look up the price table again and refresh the window
+function handlers.AUCTION_HOUSE_CLOSED()
+    ns.ResetPriceCache()
+    if LFW.RequestUIRefresh then LFW:RequestUIRefresh(true) end
 end
 
 function handlers.GET_ITEM_INFO_RECEIVED()

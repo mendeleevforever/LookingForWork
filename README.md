@@ -11,6 +11,7 @@ A WoW Forever addon for finding who in your guild can craft a recipe, whether th
   - **Left**: search box, **Filter** button and **every recipe** grouped under collapsible category bars, including the ones nobody in the guild has (shown in grey)
   - A dot in front of each recipe: **green** = an online guild member has it, **gold** = only offline members have it, none = nobody has it. The number on the right is how many members have it
   - **Right**: click a recipe to see its icon, description, what it creates, tools required, **reagents** (with how many you have in your bags) and the **crafters** list: each member's **First-name Last-name** in class colour, **Online / Offline** status (zone when online, how long ago when offline) and their skill
+  - **To Craft** and **Profit** under the reagents, from **Auctionator** prices (see below)
   - The bar at the top shows how many of the profession's recipes are known somewhere in the guild
 - **Options tab**:
   - **Update** asks your guild for their professions
@@ -55,6 +56,21 @@ The game lists every recipe of a profession in its profession window, including 
 Until then the tab shows the recipes known by members who have shared their data, plus a note on how to get the full list.
 
 Click a profession link someone posts in chat: when it opens, Looking For Work also saves the recipe list from it, and if the person is a guild member, which recipes they know.
+
+## Crafting cost and profit (Auctionator)
+
+When [Auctionator](https://www.curseforge.com/wow/addons/auctionator) is installed, the recipe panel shows two lines under the reagents, like Auctionator does in the game's own profession window:
+
+- **To Craft**: the total cost of the reagents. Each reagent uses the cheaper of its vendor price (if Auctionator has seen it at a vendor) and its latest auction house price.
+- **Profit**: what the crafted item sells for on the auction house (times how many the recipe makes), minus the auction house's 5% cut, minus the To Craft cost. Shown in red when you would lose money.
+
+Hover either line for a breakdown: each reagent's price (and whether it's a vendor or auction price), the sale price, the auction house cut, and how old the oldest price is.
+
+- Recipes that don't make an item (most enchants) show **To Craft** only.
+- Reagents Auctionator has no price for are listed as "without a price", and the profit is marked as an estimate.
+- If Auctionator isn't installed, the panel says so. Auctionator needs at least one auction house scan for prices to appear; prices refresh whenever you close the auction house.
+
+Prices come from the same places as AH Lookup: `Auctionator.API.v1.GetAuctionPriceByItemID` (and `GetVendorPriceByItemID`), falling back to Auctionator's saved price table.
 
 ## Names
 
@@ -108,6 +124,9 @@ LookingForWorkDB = {
 ```
 
 ## Changes
+
+**1.2.0**
+- **To Craft** and **Profit** lines in the recipe panel, using Auctionator's prices, with a hover breakdown per reagent.
 
 **1.1.0**
 - Search also looks through recipe tooltips and the tooltip of the item each recipe makes, so you can search for a stat or effect (`defense`, `intellect`, `fire resistance`) that isn't in the recipe's name. `/lfw find` does too.

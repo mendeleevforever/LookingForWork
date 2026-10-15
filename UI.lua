@@ -1264,6 +1264,17 @@ function LFW:CreateDetail(d)
     end
     d.colW = colW
 
+    -- Crafting cost and profit (Auctionator prices), like Auctionator's own lines
+    d.costLine = AddLabel(d, "", "GameFontHighlight", C.text)
+    d.costLine:SetWidth(DW - 32)
+    d.profitLine = AddLabel(d, "", "GameFontHighlight", C.text)
+    d.profitLine:SetWidth(DW - 32)
+    d.costHover = CreateFrame("Frame", nil, d)
+    d.costHover:EnableMouse(true)
+    d.costHover:SetScript("OnEnter", function(self) LFW:ShowCostTooltip(self) end)
+    d.costHover:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    d.costHover:Hide()
+
     d.craftHeader = AddLabel(d, "", "GameFontNormal", C.header)
     d.craftRule = d:CreateTexture(nil, "ARTWORK")
     d.craftRule:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.55)
@@ -1411,6 +1422,98 @@ local function PlaceCrafterSection(d, y, title, hint)
     d.craftScroll:SetPoint("BOTTOMRIGHT", -34, 10)
 end
 
+-------------------------------------------------------------------------------
+-- To Craft / Profit lines (Auctionator prices)
+-------------------------------------------------------------------------------
+local GOLD_LABEL = "|cffffd100"
+
+local function AgeText(days)
+    if not days then return nil end
+    if days <= 0 then return "today" end
+    return days == 1 and "1 day ago" or (days .. " days ago")
+end
+
+-- Returns the new y
+function LFW:PlaceCostLines(d, e, y)
+    if not e or not e.r then return y end          -- reagents unknown: nothing to price
+    local costText, profitText
+    if not ns.AuctionatorLoaded() then
+        costText = GOLD_LABEL .. "To Craft:|r " .. GREY .. "install Auctionator to see crafting cost and profit|r"
+    else
+        local info = ns.CraftEconomics(e)
+        d.costHover.info = info
+        local priced = #info.parts - #info.missing
+        if #info.parts > 0 and priced == 0 then
+            costText = GOLD_LABEL .. "To Craft:|r " .. GREY .. "no Auctionator prices for these reagents yet|r"
+        else
+            costText = GOLD_LABEL .. "To Craft:|r " .. ns.Coins(info.cost)
+            if #info.missing > 0 then
+                costText = costText .. GREY .. ("  + %d %s without a price|r"):format(#info.missing, #info.missing == 1 and "reagent" or "reagents")
+            end
+        end
+        if info.outItem then
+            if info.profit and #info.parts > 0 and priced == 0 then
+                profitText = GOLD_LABEL .. "Profit:|r " .. GREY .. "unknown  •  sells for|r " .. ns.Coins(info.sale * ns.AH_CUT) .. GREY .. " after the auction house cut|r"
+            elseif info.profit then
+                profitText = GOLD_LABEL .. "Profit:|r " .. (info.profit < 0 and ("|cffff4040" .. ns.Coins(info.profit) .. "|r") or ns.Coins(info.profit))
+                if #info.missing > 0 then
+                    profitText = profitText .. GREY .. "  (estimate, some reagents unpriced)|r"
+                end
+            else
+                profitText = GOLD_LABEL .. "Profit:|r " .. GREY .. "no auction price for what it makes|r"
+            end
+        end
+    end
+
+    local top = y - 2
+    y = PlaceText(d, d.costLine, costText, top, 3)
+    y = PlaceText(d, d.profitLine, profitText, y, 3)
+    if d.costHover.info then
+        d.costHover:ClearAllPoints()
+        d.costHover:SetPoint("TOPLEFT", 16, top)
+        d.costHover:SetPoint("BOTTOMRIGHT", d, "TOPRIGHT", -16, y)
+        d.costHover:Show()
+    end
+    return y - 4
+end
+
+-- Breakdown when hovering the To Craft / Profit lines
+function LFW:ShowCostTooltip(owner)
+    local info = owner.info
+    if not info then return end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Crafting cost", 1, 0.82, 0)
+    for _, p in ipairs(info.parts) do
+        local name = ns.ItemName(p.itemID) or ("Item #" .. p.itemID)
+        local left = p.qty .. "x " .. ns.ItemQualityHex(p.itemID) .. name .. "|r"
+        if p.unit then
+            local each = p.qty > 1 and (GREY .. "  (" .. ns.Coins(p.unit) .. GREY .. " each)|r") or ""
+            local src = p.source == "vendor" and (GREY .. " vendor|r") or ""
+            GameTooltip:AddDoubleLine(left .. each, ns.Coins(p.total) .. src, 1, 1, 1, 1, 1, 1)
+        else
+            GameTooltip:AddDoubleLine(left, GREY .. "no price|r", 1, 1, 1, 1, 1, 1)
+        end
+    end
+    GameTooltip:AddDoubleLine("Total", ns.Coins(info.cost), 1, 0.82, 0, 1, 1, 1)
+    if info.outItem then
+        GameTooltip:AddLine(" ")
+        local name = ns.ItemName(info.outItem) or ("Item #" .. info.outItem)
+        local qty = info.outQty ~= 1 and (info.outQty .. "x ") or ""
+        if info.sale then
+            GameTooltip:AddDoubleLine("Sells for (" .. qty .. ns.ItemQualityHex(info.outItem) .. name .. "|r)", ns.Coins(info.sale), 1, 0.82, 0, 1, 1, 1)
+            GameTooltip:AddDoubleLine("Auction house cut (5%)", "-" .. ns.Coins(info.sale - info.sale * ns.AH_CUT), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+            GameTooltip:AddDoubleLine("Profit", ns.Coins(info.profit), 1, 0.82, 0, 1, 1, 1)
+        else
+            GameTooltip:AddLine("No Auctionator price for " .. name .. ".", C.muted[1], C.muted[2], C.muted[3], true)
+        end
+    end
+    local age = AgeText(info.oldest)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Prices from Auctionator" .. (age and (", oldest seen " .. age) or "") .. ". Scan the auction house to refresh them.",
+        C.muted[1], C.muted[2], C.muted[3], true)
+    GameTooltip:Show()
+end
+
 function LFW:UpdateDetail()
     local f = self.frame
     if not f or not f.profView:IsShown() then return end
@@ -1426,6 +1529,10 @@ function LFW:UpdateDetail()
     for _, b in ipairs(d.reagents) do b:Hide() end
     d.reagNote:Hide()
     d.reagHeader:Hide()
+    d.costLine:Hide()
+    d.profitLine:Hide()
+    d.costHover:Hide()
+    d.costHover.info = nil
 
     local y
     if not id then
@@ -1518,6 +1625,9 @@ function LFW:UpdateDetail()
         d.reagNote:Show()
         y = y - math.ceil(d.reagNote:GetStringHeight()) - 10
     end
+
+    -- To Craft / Profit
+    y = self:PlaceCostLines(d, e, y)
 
     -- Who has it
     PlaceCrafterSection(d, y - 6, ("Crafters (%d)"):format(#crafters), online > 0 and (online .. " online") or "")
