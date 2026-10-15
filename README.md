@@ -20,6 +20,12 @@ A WoW Forever addon for finding who in your guild can craft a recipe, whether th
   - **Guild Members Sharing Data**: everyone you have data for, online first, with a Forget button to clear it
   - **Recipe Lists**: how many recipes are saved for each profession
 
+## Preview
+
+<img width="1126" height="829" alt="LFW options" src="https://github.com/user-attachments/assets/e536e8df-7cb8-4b37-9c3d-760703a558dd" /><br>
+
+<img width="1126" height="827" alt="LFW BS" src="https://github.com/user-attachments/assets/5f70b4a8-e51f-4493-876c-ff8c01a4818a" /><br>
+
 ## Installation
 
 1. Copy the `LookingForWork` folder into:
