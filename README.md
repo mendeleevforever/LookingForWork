@@ -66,7 +66,7 @@ WoW Forever names are "First-name Last-name". On WoW Forever `UnitName()` return
 |---|---|
 | `/lfw` or `/lookingforwork` | Open / close the window |
 | `/lfw <profession>` | Open a profession tab, e.g. `/lfw tailoring` |
-| `/lfw find <text>` | Search every profession; opens the one with the most matches |
+| `/lfw find <text>` | Search every profession (names, tooltip text, reagents, players); opens the one with the most matches |
 | `/lfw update` | Ask your guild for their professions (same as the Update button) |
 | `/lfw ignore` | Turn Ignore Queries on/off |
 | `/lfw options` | Open the Options tab |
@@ -77,7 +77,10 @@ Looking For Work also appears in the game's **Options → AddOns** list and in t
 
 ## Tips
 
-- **Search** matches recipe names, reagent names, what a recipe creates, and crafter names, so typing a guild mate's name shows everything they can make.
+- **Search** matches recipe names, **tooltip text**, what a recipe creates, reagent names and crafter names:
+  - Tooltip text covers the recipe's own tooltip and the tooltip of the item it makes, so `defense` finds *Enchant Bracer - Minor Deflect* (its tooltip says it increases Defense) and `intellect` finds food whose tooltip says it gives Intellect.
+  - Hover a recipe while searching to see why it matched, e.g. *Found by search — Tooltip: Permanently enchant bracers to increase Defense by 1.*
+  - Typing a guild mate's name shows everything they can make.
 - **Filter**: show or hide recipes nobody has, show only recipes with an online crafter, expand or collapse all categories.
 - Click a selected recipe again to go back to the profession overview, which lists every guild member with that profession, their skill and how many recipes they have shared.
 - Click a crafter to whisper them. Shift-click a recipe, its icon or a reagent to link it in chat.
@@ -105,6 +108,11 @@ LookingForWorkDB = {
 ```
 
 ## Changes
+
+**1.1.0**
+- Search also looks through recipe tooltips and the tooltip of the item each recipe makes, so you can search for a stat or effect (`defense`, `intellect`, `fire resistance`) that isn't in the recipe's name. `/lfw find` does too.
+- Hovering a recipe during a search shows which text matched.
+- Tooltip text is read in the background when you open a profession tab, so searching stays quick.
 
 **1.0.0**
 - First release.

@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.0.0"
+LFW.VERSION = "1.1.0"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -328,6 +328,140 @@ function ns.LoadItem(id, cb)
             pcall(item.ContinueOnItemLoad, item, cb)
         end
     end
+end
+
+-------------------------------------------------------------------------------
+-- Tooltip text, so search can find recipes by what they do
+-- ("defense" finds Enchant Bracer - Minor Deflect, "intellect" finds food
+-- whose tooltip says it gives Intellect). Built once per recipe per session.
+-------------------------------------------------------------------------------
+local tipCache, tipPending = {}, {}
+ns.tipCache = tipCache
+local RETRIEVING = (RETRIEVING_ITEM_INFO or "Retrieving item information"):lower()
+
+local function CleanTipText(s)
+    if type(s) ~= "string" or s == "" then return nil end
+    if issecretvalue and issecretvalue(s) then return nil end
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", ""):gsub("|A.-|a", "")
+    s = s:gsub("|H.-|h(.-)|h", "%1"):gsub("|n", " "):gsub("[\r\n]", " "):gsub("%s+", " ")
+    s = Trim(s)
+    return s ~= "" and s or nil
+end
+
+-- C_TooltipInfo data (the modern API) -> plain lines
+local function AddTooltipDataLines(data, out)
+    if type(data) ~= "table" or type(data.lines) ~= "table" then return false end
+    for _, line in ipairs(data.lines) do
+        if type(line) == "table" then
+            if line.args and line.leftText == nil and TooltipUtil and TooltipUtil.SurfaceArgs then
+                pcall(TooltipUtil.SurfaceArgs, line)
+            end
+            local l, r = CleanTipText(line.leftText), CleanTipText(line.rightText)
+            if l then out[#out + 1] = l end
+            if r then out[#out + 1] = r end
+        end
+    end
+    return true
+end
+
+-- Fallback: read a hidden tooltip line by line
+local scanTip
+local function AddScanTooltipLines(setter, arg, out)
+    if not scanTip then
+        scanTip = CreateFrame("GameTooltip", "LookingForWorkScanTooltip", nil, "GameTooltipTemplate")
+    end
+    if not scanTip or not scanTip[setter] then return false end
+    scanTip:SetOwner(WorldFrame or UIParent, "ANCHOR_NONE")
+    scanTip:ClearLines()
+    if not pcall(scanTip[setter], scanTip, arg) then scanTip:Hide(); return false end
+    for i = 1, (scanTip:NumLines() or 0) do
+        for _, side in ipairs({ "Left", "Right" }) do
+            local fs = _G["LookingForWorkScanTooltipText" .. side .. i]
+            local t = fs and CleanTipText(fs:GetText())
+            if t then out[#out + 1] = t end
+        end
+    end
+    scanTip:Hide()
+    return true
+end
+
+local function TooltipLoaded(id)
+    tipPending[id] = nil
+    local c = tipCache[id]
+    if c then c.incomplete, c.built = true, 0 end      -- rebuild on next search
+    if LFW.OnSearchDataLoaded then LFW:OnSearchDataLoaded() end
+end
+
+local function SpellReady(id)
+    if not (C_Spell and C_Spell.IsSpellDataCached) then return true end
+    if SafeCall(C_Spell.IsSpellDataCached, id) then return true end
+    if not tipPending[id] and Spell and Spell.CreateFromSpellID then
+        tipPending[id] = true
+        local ok, spell = pcall(Spell.CreateFromSpellID, Spell, id)
+        if ok and spell and spell.ContinueOnSpellLoad then
+            pcall(spell.ContinueOnSpellLoad, spell, function() TooltipLoaded(id) end)
+        end
+    end
+    return false
+end
+
+local function ItemReady(recipeID, itemID)
+    if ns.ItemName(itemID) then return true end
+    if not tipPending[recipeID] then
+        tipPending[recipeID] = true
+        ns.LoadItem(itemID, function() TooltipLoaded(recipeID) end)
+    end
+    return false
+end
+
+local function BuildTooltipLines(id, e, lines)
+    local incomplete = false
+    if e then
+        for _, saved in ipairs({ e.d or false, e.q or false }) do
+            local t = saved and CleanTipText(saved)
+            if t then lines[#lines + 1] = t end
+        end
+    end
+    -- the recipe spell ("Permanently enchant bracers to increase Defense by 1")
+    if SpellReady(id) then
+        local got = C_TooltipInfo and C_TooltipInfo.GetSpellByID
+            and AddTooltipDataLines(SafeCall(C_TooltipInfo.GetSpellByID, id), lines)
+        if not got then AddScanTooltipLines("SetSpellByID", id, lines) end
+    else
+        incomplete = true
+    end
+    -- the item it makes ("Use: ... well fed and gain 6 Intellect")
+    if e and e.o then
+        if ItemReady(id, e.o) then
+            local got = C_TooltipInfo and C_TooltipInfo.GetItemByID
+                and AddTooltipDataLines(SafeCall(C_TooltipInfo.GetItemByID, e.o), lines)
+            if not got then AddScanTooltipLines("SetItemByID", e.o, lines) end
+        else
+            incomplete = true
+        end
+    end
+    return incomplete
+end
+
+-- Returns { lines = {...}, lower = {...} } for a recipe
+function ns.GetTooltipSearch(id, e)
+    local c = tipCache[id]
+    if c and (not c.incomplete or GetTime() - c.built < 3) then return c end
+    c = { lines = {}, lower = {}, built = GetTime() }
+    local ok, incomplete = pcall(BuildTooltipLines, id, e, c.lines)
+    c.incomplete = not ok or incomplete
+    for i, line in ipairs(c.lines) do
+        local low = line:lower()
+        if low:find(RETRIEVING, 1, true) then c.incomplete = true end
+        c.lower[i] = low
+    end
+    tipCache[id] = c
+    return c
+end
+
+function ns.HasTooltipSearch(id)
+    local c = tipCache[id]
+    return c ~= nil and not c.incomplete
 end
 
 -------------------------------------------------------------------------------

@@ -384,21 +384,27 @@ local function RecipeIcon(id, e)
     return (e and e.i) or ns.SpellIcon(id) or (e and e.o and ns.ItemIcon(e.o)) or QUESTION
 end
 
-local function MatchSearch(search, name, e, crafters)
+-- Returns true plus the reason when it wasn't the name ("Tooltip: ...")
+local function MatchSearch(search, id, name, e, crafters)
     if name:lower():find(search, 1, true) then return true end
+    if e and e.o then
+        local n = ns.ItemName(e.o)
+        if n and n:lower():find(search, 1, true) then return true, "Creates: " .. n end
+    end
     if e and e.r then
         for _, r in ipairs(e.r) do
             local n = ns.ItemName(r[1])
-            if n and n:lower():find(search, 1, true) then return true end
+            if n and n:lower():find(search, 1, true) then return true, "Reagent: " .. n end
         end
     end
-    if e and e.o then
-        local n = ns.ItemName(e.o)
-        if n and n:lower():find(search, 1, true) then return true end
+    -- tooltip text: stats and effects that aren't in the name
+    local tip = ns.GetTooltipSearch(id, e)
+    for i, low in ipairs(tip.lower) do
+        if low:find(search, 1, true) then return true, "Tooltip: " .. tip.lines[i] end
     end
     if crafters then
         for _, rec in ipairs(crafters) do
-            if rec.name and rec.name:lower():find(search, 1, true) then return true end
+            if rec.name and rec.name:lower():find(search, 1, true) then return true, "Crafter: " .. rec.name end
         end
     end
     return false
@@ -429,12 +435,13 @@ function LFW:BuildEntries(key, searchText)
         local pass = true
         if not s.showUnowned and count == 0 then pass = false end
         if s.onlineOnly and online == 0 then pass = false end
-        if pass and search ~= "" then pass = MatchSearch(search, name, e, crafters) end
+        local why
+        if pass and search ~= "" then pass, why = MatchSearch(search, id, name, e, crafters) end
         if pass then
             local cname = (e and e.c) or OTHER
             local g = groups[cname]
             if not g then g = {}; groups[cname] = g end
-            g[#g + 1] = { id = id, name = name, count = count, online = online, crafters = crafters }
+            g[#g + 1] = { id = id, name = name, count = count, online = online, crafters = crafters, match = why }
         end
     end
 
@@ -497,6 +504,7 @@ function LFW:CreateMainFrame()
         if f.ticker then f.ticker:Cancel(); f.ticker = nil end
         if f.search then f.search:ClearFocus() end
         if LFW.dropList then LFW.dropList:Hide() end
+        if LFW.warmTicker then LFW.warmTicker:Cancel(); LFW.warmTicker, LFW.warmKey = nil, nil end
         GameTooltip:Hide()
     end)
     return f
@@ -725,7 +733,7 @@ function LFW:CreateProfessionView(f)
     search:SetPoint("TOPLEFT", LEFT_X + 6, CONTENT_TOP - 5)
     AddPlaceholder(search, "Search")
     search:HookScript("OnTextChanged", function() LFW:RefreshProfession(true) end)
-    AddHoverTip(search, "Search", "Matches recipe names, reagents, what it makes, and crafter names.")
+    AddHoverTip(search, "Search", "Matches recipe names and their tooltip text (stats and effects, e.g. \"defense\" or \"intellect\"), what they make, reagents, and crafter names.")
     f.search = search
 
     local filter = FlatButton(pv, "Filter  |cffffd100>|r", 84, 22)
@@ -841,6 +849,9 @@ local function GetListRow(f, i)
         if not e or e.header then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:AddLine(e.name, 1, 1, 1)
+        if e.match then
+            GameTooltip:AddLine("Found by search  —  " .. e.match, 1, 0.82, 0, true)
+        end
         if e.count == 0 then
             GameTooltip:AddLine("Nobody in the guild has this recipe yet.", C.muted[1], C.muted[2], C.muted[3])
         else
@@ -925,10 +936,50 @@ function LFW:RenderList()
 end
 
 -- Rebuild the list (and header) for the current profession
+-- Build tooltip search text a few recipes at a time, so typing in the search
+-- box never has to wait for hundreds of tooltips
+function LFW:WarmTooltipCache(key)
+    if self.warmKey == key and self.warmTicker then return end
+    if self.warmTicker then self.warmTicker:Cancel(); self.warmTicker = nil end
+    local cat = self.db.catalog[key]
+    local queue = {}
+    for id in pairs(cat and cat.recipes or {}) do
+        if not ns.HasTooltipSearch(id) then queue[#queue + 1] = id end
+    end
+    for id in pairs(self:GetCrafterIndex(key)) do
+        if not ns.HasTooltipSearch(id) and not (cat and cat.recipes[id]) then queue[#queue + 1] = id end
+    end
+    if #queue == 0 then return end
+    self.warmKey = key
+    local pos = 1
+    self.warmTicker = C_Timer.NewTicker(0.05, function()
+        local recipes = self.db.catalog[key] and self.db.catalog[key].recipes or {}
+        for _ = 1, 15 do
+            local id = queue[pos]
+            if not id then
+                if self.warmTicker then self.warmTicker:Cancel() end
+                self.warmTicker, self.warmKey = nil, nil
+                return
+            end
+            ns.GetTooltipSearch(id, recipes[id])
+            pos = pos + 1
+        end
+    end)
+end
+
+-- An item or spell finished loading: redo an active search so it can match
+function LFW:OnSearchDataLoaded()
+    local f = self.frame
+    if f and f:IsShown() and f.profView:IsShown() and f.search:GetText() ~= "" then
+        self:RequestUIRefresh()
+    end
+end
+
 function LFW:RefreshProfession(fromSearch)
     local f = self.frame
     local key = self.currentTab
     if not f or not ns.PROF_BY_KEY[key] then return end
+    self:WarmTooltipCache(key)
 
     local entries, total, known = self:BuildEntries(key, f.search:GetText())
     self.entries = entries
@@ -1883,7 +1934,7 @@ function LFW:PrintHelp()
     print(self.PREFIX .. "commands:")
     print("  |cffffd100/lfw|r  open / close the window")
     print("  |cffffd100/lfw <profession>|r  open a profession tab (e.g. /lfw tailoring)")
-    print("  |cffffd100/lfw find <text>|r  search every profession for a recipe, reagent or player")
+    print("  |cffffd100/lfw find <text>|r  search every profession by name, tooltip text (e.g. defense), reagent or player")
     print("  |cffffd100/lfw update|r  ask your guild for their professions")
     print("  |cffffd100/lfw ignore|r  turn Ignore Queries on/off")
     print("  |cffffd100/lfw options|r  open the Options tab")

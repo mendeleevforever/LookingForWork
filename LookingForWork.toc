@@ -2,7 +2,7 @@
 ## Title: Looking For Work
 ## Notes: Saves every profession recipe and finds which guild members (online or offline) can craft it
 ## Author: Claude
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: LookingForWorkDB
 ## IconTexture: Interface\Icons\INV_Misc_Note_01
 ## AddonCompartmentFunc: LookingForWork_OnAddonCompartmentClick
