@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.3.0"
+LFW.VERSION = "1.3.0-alpha"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -736,7 +736,11 @@ function LFW:InitDB()
             cat.cats    = tbl(cat.cats)
             cat.rev     = tonumber(cat.rev) or 0
             for id, e in pairs(cat.recipes) do
-                if type(id) ~= "number" or type(e) ~= "table" then cat.recipes[id] = nil end
+                if type(id) ~= "number" or type(e) ~= "table" then
+                    cat.recipes[id] = nil
+                elseif e.full == 1 and not e.r and not e.o and not e.c then
+                    e.full = nil      -- a name-only placeholder saved by an earlier version
+                end
             end
         end
     end
@@ -773,6 +777,20 @@ end
 function LFW:CatalogCount(key)
     local cat = self.db.catalog[key]
     return cat and ns.CountKeys(cat.recipes) or 0
+end
+
+-- How complete a recipe list is, for comparing with guild members: recipes
+-- read from a profession window (they have a category). Placeholder entries
+-- made when a recipe is learned (name only) don't count, so a list of three
+-- learned recipes never looks "as good" as a full list.
+function LFW:CatalogScore(key)
+    local cat = self.db.catalog[key]
+    if not cat then return 0 end
+    local n = 0
+    for _, e in pairs(cat.recipes) do
+        if e.c then n = n + 1 end
+    end
+    return n
 end
 
 function LFW:Debug(msg)
@@ -992,10 +1010,12 @@ local function BuildCategoryOrder()
 end
 
 local function ReadRecipeDetails(recipeID, entry)
+    local got = false
     -- Reagents (basic, required slots) and the item it makes
     if T.GetRecipeSchematic then
         local s = SafeCall(T.GetRecipeSchematic, recipeID, false)
-        if type(s) == "table" then
+        if type(s) == "table" and type(s.reagentSlotSchematics) == "table" then
+            got = true
             local basic = Enum and Enum.CraftingReagentType and Enum.CraftingReagentType.Basic
             local list = {}
             for _, slot in ipairs(s.reagentSlotSchematics or {}) do
@@ -1029,7 +1049,8 @@ local function ReadRecipeDetails(recipeID, entry)
         local d = SafeCall(T.GetRecipeDescription, recipeID, {})
         if type(d) == "string" and d ~= "" then entry.d = d:sub(1, 400) end
     end
-    entry.full = true
+    if got then entry.full = true end
+    return got
 end
 
 local function ResolveOpenProfession()
@@ -1091,7 +1112,7 @@ function LFW:ScanOpenTradeSkill()
     local cat = self:GetCatalog(prof.key)
     local catOrder = BuildCategoryOrder()
     local catNames = {}
-    local added, known, budget = 0, {}, 0
+    local added, upgraded, known, budget = 0, 0, {}, 0
 
     for _, id in ipairs(ids) do
         local info = SafeCall(T.GetRecipeInfo, id)
@@ -1117,7 +1138,10 @@ function LFW:ScanOpenTradeSkill()
                         if not cat.cats[cname] or cat.cats[cname] > o or cat.cats[cname] >= 900 then cat.cats[cname] = o end
                     end
                 end
-                if cname then entry.c = cname end
+                if cname then
+                    if not entry.c then upgraded = upgraded + 1 end
+                    entry.c = cname
+                end
             end
             -- Reagents etc. are read once per recipe (the list update event fires often)
             -- (entry.full == 1 means the details came from a guild member; read our own)
@@ -1128,7 +1152,7 @@ function LFW:ScanOpenTradeSkill()
             if info.learned then known[id] = true end
         end
     end
-    if added > 0 then cat.rev = (cat.rev or 0) + 1 end
+    if added > 0 or upgraded > 0 then cat.rev = (cat.rev or 0) + 1 end
     if not isLinked then cat.scanned = time() end
 
     local lvl, max = Levels(base, child)
@@ -1145,14 +1169,16 @@ function LFW:ScanOpenTradeSkill()
             if max > 0 then p.max = max end
             p.scanned = time()
             me.profs[prof.key] = p
-            if changed then
+            -- New recipes in the list (or placeholders filled in) also count as a
+            -- change: sharing my data tells guild members my list grew, and
+            -- they ask me for it.
+            local improved = added > 0 or upgraded > 0
+            if changed or improved then
                 self:BumpRecord(me)
-            elseif added > 0 then
-                self:DataChanged(false)
             end
         end
     end
-    if added > 0 and isLinked then self:DataChanged(false) end
+    if (added > 0 or upgraded > 0) and isLinked then self:DataChanged(false) end
     self:Debug(("Scanned %s: %d recipes listed, %d known%s."):format(prof.name, #ids, ns.CountKeys(known),
         isLinked and (" (linked by " .. tostring(linkedName) .. ")") or ""))
 end
@@ -1208,8 +1234,18 @@ function LFW:OnRecipeLearned(recipeID)
     me.profs[prof.key] = p
     local cat = self:GetCatalog(prof.key)
     if not cat.recipes[recipeID] then
-        cat.recipes[recipeID] = { n = ns.SpellName(recipeID) }
+        local entry = { n = ns.SpellName(recipeID) }
+        cat.recipes[recipeID] = entry
         cat.rev = (cat.rev or 0) + 1
+        -- the game can often describe a recipe even with the window closed
+        local info = T.GetRecipeInfo and SafeCall(T.GetRecipeInfo, recipeID)
+        if type(info) == "table" then
+            if type(info.name) == "string" and info.name ~= "" then entry.n = info.name end
+            entry.i = info.icon or entry.i
+            local ci = info.categoryID and T.GetCategoryInfo and SafeCall(T.GetCategoryInfo, info.categoryID)
+            if type(ci) == "table" and type(ci.name) == "string" and ci.name ~= "" then entry.c = ci.name end
+        end
+        pcall(ReadRecipeDetails, recipeID, entry)
     end
     if p.known and p.known[recipeID] then return end
     p.known = p.known or {}

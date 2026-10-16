@@ -53,11 +53,11 @@ local TARGETED_DELAY_MIN      = 1      -- answering a request addressed to me
 local TARGETED_DELAY_MAX      = 3
 
 LFW.recentSends     = {}   -- guid -> { rev, time } (what I broadcast lately)
-LFW.recentCatalogs  = {}   -- profKey -> time a full list went out (by anyone)
+LFW.recentCatalogs  = {}   -- profKey -> { t = time, n = size } of the last list sent (by anyone)
 LFW.pendingCatalogs = {}   -- profKey -> { timer }
 LFW.pendingData     = {}   -- guid -> true (my characters to send soon)
 LFW.pendingRequests = {}   -- profKey -> member short id to ask for its recipe list
-LFW.lastRequested   = {}   -- profKey -> time I last asked for its recipe list
+LFW.lastRequested   = {}   -- profKey -> { t = time, n = size advertised } when I last asked
 
 local function MyId() return ns.ShortId(UnitGUID("player")) end
 
@@ -252,20 +252,34 @@ end
 -------------------------------------------------------------------------------
 -- Recipe lists
 -------------------------------------------------------------------------------
+-- Sizes of my recipe lists, as compared with guild members (see CatalogScore)
 function LFW:CatalogCounts()
     local counts = {}
     for _, p in ipairs(ns.PROFESSIONS) do
-        local n = self:CatalogCount(p.key)
+        local n = self:CatalogScore(p.key)
         if n > 0 then counts[p.key] = n end
     end
     return counts
 end
 
+-- A list of this size (or bigger) went out recently, so mine adds nothing yet.
+-- A list that has grown since it was last sent is never held back.
+function LFW:CatalogRecentlySent(key, size)
+    local r = self.recentCatalogs[key]
+    return r and time() - r.t < CATALOG_QUIET and (size or self:CatalogScore(key)) <= r.n
+end
+
+function LFW:NoteCatalogSent(key, size)
+    size = tonumber(size) or 0
+    local r = self.recentCatalogs[key]
+    if r and time() - r.t < CATALOG_QUIET and r.n > size then size = r.n end
+    self.recentCatalogs[key] = { t = time(), n = size }
+end
+
 -- targeted: answering a request addressed to me (shorter wait)
 function LFW:ScheduleCatalog(key, targeted)
     if self.pendingCatalogs[key] then return end
-    local last = self.recentCatalogs[key]
-    if last and time() - last < CATALOG_QUIET then return end
+    if self:CatalogRecentlySent(key) then return end
     local lo, hi = CATALOG_DELAY_MIN, CATALOG_DELAY_MAX
     if targeted then lo, hi = TARGETED_DELAY_MIN, TARGETED_DELAY_MAX end
     local delay = lo + math.random() * (hi - lo)
@@ -276,41 +290,33 @@ end
 
 function LFW:CancelCatalog(key, theirCount)
     local p = self.pendingCatalogs[key]
-    if p and (tonumber(theirCount) or 0) >= self:CatalogCount(key) then
+    if p and (tonumber(theirCount) or 0) >= self:CatalogScore(key) then
         p.timer:Cancel()
         self.pendingCatalogs[key] = nil
     end
 end
 
 -- A recipe list for this profession is on its way (or was just sent): no need to ask
-function LFW:DropCatalogRequest(key)
-    self.pendingRequests[key] = nil
+-- size: how big the list on its way is (nil: drop regardless)
+function LFW:DropCatalogRequest(key, size)
+    local req = self.pendingRequests[key]
+    if req and (size == nil or (tonumber(size) or 0) >= req.n) then
+        self.pendingRequests[key] = nil
+    end
 end
 
--- Data arrived from a member: ask them for any recipe list I'm missing.
--- theirCounts: the sender's recipe list sizes (nil from older versions)
-function LFW:CheckMissingCatalogs(chars, theirCounts, from)
-    if type(from) ~= "string" or #from > 20 then return end
-    theirCounts = type(theirCounts) == "table" and theirCounts or {}
-    local now = time()
-    for _, rec in ipairs(chars) do
-        for key, prof in pairs(rec.profs) do
-            local mine = self:CatalogCount(key)
-            local want = (tonumber(theirCounts[key]) or 0) > mine
-            if not want and prof.known then
-                local recipes = self.db.catalog[key] and self.db.catalog[key].recipes or {}
-                for id in pairs(prof.known) do
-                    if not recipes[id] then want = true; break end
-                end
-            end
-            local recent = self.recentCatalogs[key] and now - self.recentCatalogs[key] < CATALOG_QUIET
-            local asked = self.lastRequested[key] and now - self.lastRequested[key] < REQUEST_RETRY
-            if want and not recent and not asked and not self.pendingRequests[key] then
-                self.pendingRequests[key] = from
-            end
-        end
-    end
-    if next(self.pendingRequests) and not self.requestTimer then
+-- Ask a member for a recipe list if theirs is bigger than mine, unless that
+-- list is already on its way or I asked for a list this size recently.
+function LFW:WantCatalog(key, theirSize, from, missingKnown)
+    theirSize = tonumber(theirSize) or 0
+    local mine = self:CatalogScore(key)
+    if theirSize <= mine and not missingKnown then return end
+    if self.pendingRequests[key] then return end
+    if theirSize > 0 and self:CatalogRecentlySent(key, theirSize) then return end
+    local r = self.lastRequested[key]
+    if r and time() - r.t < REQUEST_RETRY and theirSize <= r.n then return end
+    self.pendingRequests[key] = { from = from, n = theirSize }
+    if not self.requestTimer then
         local delay = REQUEST_DELAY_MIN + math.random() * (REQUEST_DELAY_MAX - REQUEST_DELAY_MIN)
         self.requestTimer = C_Timer.NewTimer(delay, function()
             self.requestTimer = nil
@@ -319,12 +325,32 @@ function LFW:CheckMissingCatalogs(chars, theirCounts, from)
     end
 end
 
+-- Data arrived from a member: ask them for any recipe list I'm missing.
+-- theirCounts: the sender's recipe list sizes (nil from older versions)
+function LFW:CheckMissingCatalogs(chars, theirCounts, from)
+    if type(from) ~= "string" or #from > 20 then return end
+    theirCounts = type(theirCounts) == "table" and theirCounts or {}
+    for _, rec in ipairs(chars) do
+        for key, prof in pairs(rec.profs) do
+            -- recipes they know that my list lacks, or only has as a placeholder
+            local missing = false
+            if prof.known then
+                local recipes = self.db.catalog[key] and self.db.catalog[key].recipes or {}
+                for id in pairs(prof.known) do
+                    if not recipes[id] or not recipes[id].c then missing = true; break end
+                end
+            end
+            self:WantCatalog(key, theirCounts[key], from, missing)
+        end
+    end
+end
+
 function LFW:SendCatalogRequests()
     local byMember = {}
-    for key, member in pairs(self.pendingRequests) do
-        byMember[member] = byMember[member] or {}
-        table.insert(byMember[member], key)
-        self.lastRequested[key] = time()
+    for key, req in pairs(self.pendingRequests) do
+        byMember[req.from] = byMember[req.from] or {}
+        table.insert(byMember[req.from], key)
+        self.lastRequested[key] = { t = time(), n = req.n }
     end
     wipe(self.pendingRequests)
     for member, keys in pairs(byMember) do
@@ -339,7 +365,7 @@ function LFW:HandleRequest(msg)
         if i > #ns.PROFESSIONS then break end
         if ns.PROF_BY_KEY[key] then
             if msg.to == ns.ShortId(UnitGUID("player")) then
-                if not self.db.settings.ignoreQueries and self:CatalogCount(key) > 0 then
+                if not self.db.settings.ignoreQueries and self:CatalogScore(key) > 0 then
                     self:ScheduleCatalog(key, true)
                 end
             else
@@ -361,6 +387,7 @@ local function EntryString(id, e, catIndex)
         e.qmin or "",
         e.qmax or "",
         type(e.i) == "number" and e.i > 0 and ns.ToB36(e.i) or "",
+        e.full and "1" or "0",      -- "0": only a name (recipe learned, window not opened yet)
     }
     return table.concat(fields, ";")
 end
@@ -369,11 +396,11 @@ function LFW:SendCatalog(key)
     self.pendingCatalogs[key] = nil
     if self.db.settings.ignoreQueries then return end
     local cat = self.db.catalog[key]
-    local count = self:CatalogCount(key)
+    local count = self:CatalogScore(key)
     if not cat or count == 0 then return end
 
     self:SendGuild({ t = "I", p = key, n = count }, "NORMAL", "I" .. key)
-    self.recentCatalogs[key] = time()
+    self:NoteCatalogSent(key, count)
 
     local ids = {}
     for id in pairs(cat.recipes) do ids[#ids + 1] = id end
@@ -403,7 +430,16 @@ end
 -- Receiving
 -------------------------------------------------------------------------------
 function LFW:HandleQuery(msg)
-    if self.db.settings.ignoreQueries or not self.guildKey then return end
+    if not self.guildKey then return end
+    if self.db.settings.ignoreQueries then
+        -- not answering, but I can still ask the asker for lists better than mine
+        local theirs = type(msg.c) == "table" and msg.c or {}
+        for _, p in ipairs(ns.PROFESSIONS) do
+            local their = tonumber(theirs[p.key]) or 0
+            if their > self:CatalogScore(p.key) then self:WantCatalog(p.key, their, msg.from) end
+        end
+        return
+    end
     local have = type(msg.h) == "table" and msg.h or {}
     local any = false
     for guid, rec in pairs(self.db.players) do
@@ -426,8 +462,10 @@ function LFW:HandleQuery(msg)
 
     local theirs = type(msg.c) == "table" and msg.c or {}
     for _, p in ipairs(ns.PROFESSIONS) do
-        local mine = self:CatalogCount(p.key)
-        if mine > 0 and mine > (tonumber(theirs[p.key]) or 0) then self:ScheduleCatalog(p.key) end
+        local mine, their = self:CatalogScore(p.key), tonumber(theirs[p.key]) or 0
+        if mine > 0 and mine > their then self:ScheduleCatalog(p.key) end
+        -- the asker has a better list than mine: ask them for it
+        if their > mine then self:WantCatalog(p.key, their, msg.from) end
     end
 end
 
@@ -470,8 +508,8 @@ function LFW:HandleCatalog(msg)
     local key = msg.p
     if not ns.PROF_BY_KEY[key] or type(msg.e) ~= "table" then return end
     self:CancelCatalog(key, msg.n)
-    self:DropCatalogRequest(key)
-    self.recentCatalogs[key] = time()
+    self:DropCatalogRequest(key, msg.n)
+    self:NoteCatalogSent(key, msg.n)
 
     local cat = self:GetCatalog(key)
     local catNames = {}
@@ -510,7 +548,13 @@ function LFW:HandleCatalog(msg)
                     local icon = tonumber(f[9] or "", 36)
                     if icon and icon > 0 and icon < 2147483647 then e.i = icon end
                 end
-                if not e.full then
+                -- Does the sender's entry have real details? (older versions
+                -- don't say; then it does if it has a category, reagents or an item)
+                local detailed
+                if f[10] == "1" then detailed = true
+                elseif f[10] == "0" then detailed = false
+                else detailed = (f[3] or "") ~= "" or (f[4] or "") ~= "" or (f[5] or "") ~= "" end
+                if detailed and e.full ~= true and (not e.full or (not e.r and not e.o)) then
                     e.r = ns.DecodeReagents(f[4])
                     local out = tonumber(f[5] or "", 36)
                     e.o = (out and out > 0) and out or nil
@@ -547,8 +591,8 @@ function LFW:OnCommReceived(prefix, data, distribution, sender)
     if msg.t == "I" then
         if ns.PROF_BY_KEY[msg.p] then
             self:CancelCatalog(msg.p, msg.n)
-            self:DropCatalogRequest(msg.p)
-            self.recentCatalogs[msg.p] = time()
+            self:DropCatalogRequest(msg.p, msg.n)
+            self:NoteCatalogSent(msg.p, msg.n)
         end
         return
     end

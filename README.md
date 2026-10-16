@@ -42,7 +42,9 @@ The Ace3 libraries it needs (LibStub, CallbackHandler, AceComm-3.0 with ChatThro
 - **Update** sends one small request listing which version of each member's data you already have. Only members whose data you are missing or have an older copy of reply, after a short random delay so replies don't all arrive at once. Each reply goes to the whole guild channel, so one reply updates every addon user at the same time.
 - **Update can be pressed once a minute** (the button shows a countdown).
 - **Recipe lists** (the full list of every recipe in a profession) are only sent when someone's list is smaller than yours. If several members could send the same list, the first one announces it and the others stand down, so it goes out once.
-- **Missing recipe lists are requested automatically.** Shared data says how big the sender's recipe lists are. If a guild member's data arrives for a profession whose list you don't have (or yours is smaller, or is missing recipes they know), your addon asks that member for it. The same list is asked for at most once every 10 minutes, and if someone else already asked, you just receive their answer.
+- **Missing recipe lists are requested automatically.** Shared data says how big the sender's recipe lists are. If a guild member's data arrives for a profession whose list you don't have (or yours is smaller, or is missing recipes they know), your addon asks that member for it. The same list is asked for at most once every 10 minutes unless the member's list has grown since, and if someone else already asked, you just receive their answer.
+- **A list that grows is shared again.** When someone opens a profession window and their recipe list gets bigger, that counts as a change to their data, so it's shared and guild members fetch the bigger list. A list that has grown is never held back by the "sent recently" limits.
+- **Learning a recipe isn't the same as having the list.** Learning a profession or recipe with the window closed only saves the recipe's name. These name-only entries don't count toward a list's size, so a full list from someone who has opened the window always replaces them.
 - **Automatic sharing**: when your own professions change (new recipe, skill-up, newly scanned profession), your data is shared once, a minute later, and at most once every 5 minutes. Turned off by Ignore Queries.
 - Members only ever send **their own characters' data**, never other people's.
 - Messages are queued through ChatThrottleLib (part of Ace3), which keeps the send rate under the game's limits. Nothing is sent during combat; it waits until combat ends.
@@ -126,9 +128,15 @@ LookingForWorkDB = {
 
 ## Changes
 
-**1.3.0**
-- Fix: a profession could show every recipe under "Other" when a guild member's data arrived through automatic sharing rather than an Update, because the recipe list wasn't sent with it. Missing recipe lists are now requested from that member automatically.
+**1.3.0-alpha**
+- Fix: a profession could show every recipe under "Other", with no categories and no unknown recipes, when a guild member's recipe list didn't reach you. Recipe lists are now requested and shared automatically:
+  - Shared data says how big the sender's recipe lists are, and if a member's list is bigger than yours (or has recipes yours lacks), your addon asks them for it, even when their data arrived through automatic sharing rather than an Update.
+  - Opening a profession window that adds recipes to your list shares your data again, so guild members learn your list grew.
+  - A list that has grown is never held back because a smaller one was sent in the last two minutes, and the 10-minute limit on asking again doesn't apply when the member's list has grown.
+  - Name-only entries (from learning a recipe with the window closed) don't count as a recipe list and aren't marked as complete when received, so they're filled in later. Entries already saved this way are repaired on login.
+  - When a guild member presses Update and their list is better than yours, you ask them for it too.
 - Fix: recipes received from guild members could show a generic placeholder icon. Recipe icons are now shared, and the icon of the item a recipe makes is used before the recipe spell's icon.
+- When a recipe is learned, its details are read from the game straight away when the game provides them.
 - The header bar says when a profession's recipe list hasn't been received yet.
 
 **1.2.0**
