@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: Looking For Work
 ## Notes: Saves every profession recipe and finds which guild members (online or offline) can craft it
-## Author: Claude
-## Version: 1.2.1
+## Author: MendeleevForever
+## Version: 1.2.2
 ## OptionalDeps: Auctionator
 ## SavedVariables: LookingForWorkDB
 ## IconTexture: Interface\Icons\INV_Misc_Note_01
