@@ -128,7 +128,7 @@ LookingForWorkDB = {
 
 ## Changes
 
-**1.3.0-alpha**
+**1.2.1**
 - Fix: a profession could show every recipe under "Other", with no categories and no unknown recipes, when a guild member's recipe list didn't reach you. Recipe lists are now requested and shared automatically:
   - Shared data says how big the sender's recipe lists are, and if a member's list is bigger than yours (or has recipes yours lacks), your addon asks them for it, even when their data arrived through automatic sharing rather than an Update.
   - Opening a profession window that adds recipes to your list shares your data again, so guild members learn your list grew.
