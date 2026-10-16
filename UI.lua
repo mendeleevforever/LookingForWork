@@ -380,8 +380,10 @@ local function RecipeName(id, e)
     return (e and e.n) or ns.SpellName(id) or ("Recipe #" .. id)
 end
 
+-- The item a recipe makes has the meaningful icon; many recipe spells only
+-- have a generic placeholder icon, so the spell's icon is the last resort.
 local function RecipeIcon(id, e)
-    return (e and e.i) or ns.SpellIcon(id) or (e and e.o and ns.ItemIcon(e.o)) or QUESTION
+    return (e and e.i) or (e and e.o and ns.ItemIcon(e.o)) or ns.SpellIcon(id) or QUESTION
 end
 
 -- Returns true plus the reason when it wasn't the name ("Tooltip: ...")
@@ -992,7 +994,9 @@ function LFW:RefreshProfession(fromSearch)
     pv.icon:SetTexture(ns.ProfIcon(key))
     pv.title:SetText(ns.ProfName(key))
     pv.bar:SetValue(total > 0 and known / total or 0)
-    if total > 0 then
+    if total > 0 and self:CatalogCount(key) == 0 then
+        pv.barText:SetText(("%s   recipe list not received yet  —  showing the %d recipes guild members know"):format(ns.ProfName(key), total))
+    elseif total > 0 then
         pv.barText:SetText(("%s   %d / %d recipes known in the guild"):format(ns.ProfName(key), known, total))
     else
         pv.barText:SetText(ns.ProfName(key) .. "   no recipe list saved yet")

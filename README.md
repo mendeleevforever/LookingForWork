@@ -20,12 +20,6 @@ A WoW Forever addon for finding who in your guild can craft a recipe, whether th
   - **Guild Members Sharing Data**: everyone you have data for, online first, with a Forget button to clear it
   - **Recipe Lists**: how many recipes are saved for each profession
 
-## Preview
-
-<img width="1126" height="829" alt="LFW options" src="https://github.com/user-attachments/assets/e536e8df-7cb8-4b37-9c3d-760703a558dd" /><br>
-
-<img width="1126" height="827" alt="LFW BS" src="https://github.com/user-attachments/assets/5f70b4a8-e51f-4493-876c-ff8c01a4818a" /><br>
-
 ## Installation
 
 1. Copy the `LookingForWork` folder into:
@@ -48,6 +42,7 @@ The Ace3 libraries it needs (LibStub, CallbackHandler, AceComm-3.0 with ChatThro
 - **Update** sends one small request listing which version of each member's data you already have. Only members whose data you are missing or have an older copy of reply, after a short random delay so replies don't all arrive at once. Each reply goes to the whole guild channel, so one reply updates every addon user at the same time.
 - **Update can be pressed once a minute** (the button shows a countdown).
 - **Recipe lists** (the full list of every recipe in a profession) are only sent when someone's list is smaller than yours. If several members could send the same list, the first one announces it and the others stand down, so it goes out once.
+- **Missing recipe lists are requested automatically.** Shared data says how big the sender's recipe lists are. If a guild member's data arrives for a profession whose list you don't have (or yours is smaller, or is missing recipes they know), your addon asks that member for it. The same list is asked for at most once every 10 minutes, and if someone else already asked, you just receive their answer.
 - **Automatic sharing**: when your own professions change (new recipe, skill-up, newly scanned profession), your data is shared once, a minute later, and at most once every 5 minutes. Turned off by Ignore Queries.
 - Members only ever send **their own characters' data**, never other people's.
 - Messages are queued through ChatThrottleLib (part of Ace3), which keeps the send rate under the game's limits. Nothing is sent during combat; it waits until combat ends.
@@ -130,6 +125,11 @@ LookingForWorkDB = {
 ```
 
 ## Changes
+
+**1.3.0**
+- Fix: a profession could show every recipe under "Other" when a guild member's data arrived through automatic sharing rather than an Update, because the recipe list wasn't sent with it. Missing recipe lists are now requested from that member automatically.
+- Fix: recipes received from guild members could show a generic placeholder icon. Recipe icons are now shared, and the icon of the item a recipe makes is used before the recipe spell's icon.
+- The header bar says when a profession's recipe list hasn't been received yet.
 
 **1.2.0**
 - **To Craft** and **Profit** lines in the recipe panel, using Auctionator's prices, with a hover breakdown per reagent.

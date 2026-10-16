@@ -15,8 +15,12 @@
 --                 reply serves everybody.
 --   I  intent     "I am about to send the Alchemy recipe list" (tiny). Others
 --                 who planned to send the same list stand down.
---   C  catalog    a full recipe list (names, categories, reagents) for one
---                 profession; only sent when the asker's list is smaller.
+--   C  catalog    a full recipe list (names, categories, reagents, icons) for
+--                 one profession; only sent when the asker's list is smaller.
+--   R  request    "please send your Tailoring recipe list" to one member. Sent
+--                 automatically when their data arrives (D carries the size of
+--                 the sender's recipe lists) and my list for that profession is
+--                 smaller or is missing recipes they know.
 --
 -- "Ignore Queries" (Options) stops you (all your characters) from answering Q messages and
 -- from sharing automatically; it still receives what others send.
@@ -42,11 +46,18 @@ local AUTO_SHARE_MIN_INTERVAL = 300    -- at most one automatic share per 5 minu
 local MAX_CHARS_PER_MSG       = 12
 local CATALOG_CHUNK           = 120    -- recipes per C message
 local MAX_MSG_BYTES           = 250000
+local REQUEST_DELAY_MIN       = 2      -- wait before asking for a recipe list...
+local REQUEST_DELAY_MAX       = 6      -- ...so someone else's ask can cover it
+local REQUEST_RETRY           = 600    -- ask for the same recipe list at most every 10 min
+local TARGETED_DELAY_MIN      = 1      -- answering a request addressed to me
+local TARGETED_DELAY_MAX      = 3
 
 LFW.recentSends     = {}   -- guid -> { rev, time } (what I broadcast lately)
 LFW.recentCatalogs  = {}   -- profKey -> time a full list went out (by anyone)
 LFW.pendingCatalogs = {}   -- profKey -> { timer }
 LFW.pendingData     = {}   -- guid -> true (my characters to send soon)
+LFW.pendingRequests = {}   -- profKey -> member short id to ask for its recipe list
+LFW.lastRequested   = {}   -- profKey -> time I last asked for its recipe list
 
 local function MyId() return ns.ShortId(UnitGUID("player")) end
 
@@ -156,7 +167,7 @@ function LFW:BroadcastMyData(only)
     for i = 1, #chars, MAX_CHARS_PER_MSG do
         local slice = {}
         for j = i, math.min(i + MAX_CHARS_PER_MSG - 1, #chars) do slice[#slice + 1] = chars[j] end
-        self:SendGuild({ t = "D", ch = slice }, "NORMAL", "D" .. i)
+        self:SendGuild({ t = "D", ch = slice, c = self:CatalogCounts() }, "NORMAL", "D" .. i)
     end
     if #chars > 0 then self:Debug(("Shared data for %d character(s)."):format(#chars)) end
     return #chars
@@ -219,12 +230,7 @@ function LFW:RequestUpdate()
     for guid, rec in pairs(self.db.players) do
         if not rec.mine and rec.guild == self.guildKey then have[ns.ShortId(guid)] = rec.rev or 0 end
     end
-    local cat = {}
-    for _, p in ipairs(ns.PROFESSIONS) do
-        local n = self:CatalogCount(p.key)
-        if n > 0 then cat[p.key] = n end
-    end
-    self:SendGuild({ t = "Q", h = have, c = cat }, "NORMAL", "Q")
+    self:SendGuild({ t = "Q", h = have, c = self:CatalogCounts() }, "NORMAL", "Q")
     self.db.sync.lastQuery = time()
     self.queryState = { time = time(), replies = {} }
     self:RequestRoster()
@@ -246,11 +252,23 @@ end
 -------------------------------------------------------------------------------
 -- Recipe lists
 -------------------------------------------------------------------------------
-function LFW:ScheduleCatalog(key)
+function LFW:CatalogCounts()
+    local counts = {}
+    for _, p in ipairs(ns.PROFESSIONS) do
+        local n = self:CatalogCount(p.key)
+        if n > 0 then counts[p.key] = n end
+    end
+    return counts
+end
+
+-- targeted: answering a request addressed to me (shorter wait)
+function LFW:ScheduleCatalog(key, targeted)
     if self.pendingCatalogs[key] then return end
     local last = self.recentCatalogs[key]
     if last and time() - last < CATALOG_QUIET then return end
-    local delay = CATALOG_DELAY_MIN + math.random() * (CATALOG_DELAY_MAX - CATALOG_DELAY_MIN)
+    local lo, hi = CATALOG_DELAY_MIN, CATALOG_DELAY_MAX
+    if targeted then lo, hi = TARGETED_DELAY_MIN, TARGETED_DELAY_MAX end
+    local delay = lo + math.random() * (hi - lo)
     self.pendingCatalogs[key] = {
         timer = C_Timer.NewTimer(delay, function() self:SendCatalog(key) end),
     }
@@ -264,6 +282,74 @@ function LFW:CancelCatalog(key, theirCount)
     end
 end
 
+-- A recipe list for this profession is on its way (or was just sent): no need to ask
+function LFW:DropCatalogRequest(key)
+    self.pendingRequests[key] = nil
+end
+
+-- Data arrived from a member: ask them for any recipe list I'm missing.
+-- theirCounts: the sender's recipe list sizes (nil from older versions)
+function LFW:CheckMissingCatalogs(chars, theirCounts, from)
+    if type(from) ~= "string" or #from > 20 then return end
+    theirCounts = type(theirCounts) == "table" and theirCounts or {}
+    local now = time()
+    for _, rec in ipairs(chars) do
+        for key, prof in pairs(rec.profs) do
+            local mine = self:CatalogCount(key)
+            local want = (tonumber(theirCounts[key]) or 0) > mine
+            if not want and prof.known then
+                local recipes = self.db.catalog[key] and self.db.catalog[key].recipes or {}
+                for id in pairs(prof.known) do
+                    if not recipes[id] then want = true; break end
+                end
+            end
+            local recent = self.recentCatalogs[key] and now - self.recentCatalogs[key] < CATALOG_QUIET
+            local asked = self.lastRequested[key] and now - self.lastRequested[key] < REQUEST_RETRY
+            if want and not recent and not asked and not self.pendingRequests[key] then
+                self.pendingRequests[key] = from
+            end
+        end
+    end
+    if next(self.pendingRequests) and not self.requestTimer then
+        local delay = REQUEST_DELAY_MIN + math.random() * (REQUEST_DELAY_MAX - REQUEST_DELAY_MIN)
+        self.requestTimer = C_Timer.NewTimer(delay, function()
+            self.requestTimer = nil
+            self:SendCatalogRequests()
+        end)
+    end
+end
+
+function LFW:SendCatalogRequests()
+    local byMember = {}
+    for key, member in pairs(self.pendingRequests) do
+        byMember[member] = byMember[member] or {}
+        table.insert(byMember[member], key)
+        self.lastRequested[key] = time()
+    end
+    wipe(self.pendingRequests)
+    for member, keys in pairs(byMember) do
+        self:SendGuild({ t = "R", to = member, p = keys }, "NORMAL", "R" .. member)
+        self:Debug(("Asked for recipe lists: %s"):format(table.concat(keys, ", ")))
+    end
+end
+
+function LFW:HandleRequest(msg)
+    if type(msg.p) ~= "table" then return end
+    for i, key in ipairs(msg.p) do
+        if i > #ns.PROFESSIONS then break end
+        if ns.PROF_BY_KEY[key] then
+            if msg.to == ns.ShortId(UnitGUID("player")) then
+                if not self.db.settings.ignoreQueries and self:CatalogCount(key) > 0 then
+                    self:ScheduleCatalog(key, true)
+                end
+            else
+                -- someone else asked for this list; their answer reaches me too
+                self:DropCatalogRequest(key)
+            end
+        end
+    end
+end
+
 local function EntryString(id, e, catIndex)
     local fields = {
         ns.ToB36(id),
@@ -274,6 +360,7 @@ local function EntryString(id, e, catIndex)
         (CleanText(e.q, 80) or ""):gsub(";", ","),
         e.qmin or "",
         e.qmax or "",
+        type(e.i) == "number" and e.i > 0 and ns.ToB36(e.i) or "",
     }
     return table.concat(fields, ";")
 end
@@ -347,7 +434,7 @@ end
 function LFW:HandleData(msg)
     if not self.guildKey or type(msg.ch) ~= "table" then return end
     local myGuid, roster = UnitGUID("player"), ns.roster
-    local changed = false
+    local changed, received = false, {}
     for i, c in ipairs(msg.ch) do
         if i > MAX_CHARS_PER_MSG then break end
         if type(c) == "table" and ns.ValidGuid(c.id) and c.id ~= myGuid then
@@ -370,17 +457,20 @@ function LFW:HandleData(msg)
                     }
                     changed = true
                 end
+                if self.db.players[c.id] then received[#received + 1] = self.db.players[c.id] end
                 if self.queryState then self.queryState.replies[c.id] = true end
             end
         end
     end
     if changed then self:DataChanged(false) end
+    if #received > 0 then self:CheckMissingCatalogs(received, msg.c, msg.from) end
 end
 
 function LFW:HandleCatalog(msg)
     local key = msg.p
     if not ns.PROF_BY_KEY[key] or type(msg.e) ~= "table" then return end
     self:CancelCatalog(key, msg.n)
+    self:DropCatalogRequest(key)
     self.recentCatalogs[key] = time()
 
     local cat = self:GetCatalog(key)
@@ -416,6 +506,10 @@ function LFW:HandleCatalog(msg)
                 end
                 if not e.n then e.n = CleanText(f[2]) end
                 if not e.c then e.c = catNames[tonumber(f[3] or "")] end
+                if not e.i then
+                    local icon = tonumber(f[9] or "", 36)
+                    if icon and icon > 0 and icon < 2147483647 then e.i = icon end
+                end
                 if not e.full then
                     e.r = ns.DecodeReagents(f[4])
                     local out = tonumber(f[5] or "", 36)
@@ -427,10 +521,8 @@ function LFW:HandleCatalog(msg)
             end
         end
     end
-    if added > 0 then
-        cat.rev = (cat.rev or 0) + 1
-        self:DataChanged(false)
-    end
+    if added > 0 then cat.rev = (cat.rev or 0) + 1 end
+    self:DataChanged(false)      -- new recipes, categories, icons or reagents
 end
 
 function LFW:OnCommReceived(prefix, data, distribution, sender)
@@ -450,10 +542,12 @@ function LFW:OnCommReceived(prefix, data, distribution, sender)
     local handler = (msg.t == "Q" and self.HandleQuery)
         or (msg.t == "D" and self.HandleData)
         or (msg.t == "C" and self.HandleCatalog)
+        or (msg.t == "R" and self.HandleRequest)
         or nil
     if msg.t == "I" then
         if ns.PROF_BY_KEY[msg.p] then
             self:CancelCatalog(msg.p, msg.n)
+            self:DropCatalogRequest(msg.p)
             self.recentCatalogs[msg.p] = time()
         end
         return
