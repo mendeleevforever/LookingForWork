@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.2.2"
+LFW.VERSION = "1.3.0"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -235,6 +235,25 @@ function ns.DecodeIds(s, max)
         if prev > 0 and prev < 2147483647 then set[prev] = true end
     end
     return set
+end
+
+-- Known recipes are stored in this compact form too (about 2 KB per member
+-- instead of about 40 KB as a Lua table). These read it without decoding it.
+function ns.CountIds(s)
+    if type(s) ~= "string" or s == "" then return 0 end
+    local _, dots = s:gsub("%.", "")
+    return dots + 1
+end
+
+-- Is this recipe in the list? (ids are sorted, so it stops early)
+function ns.IdsHas(s, id)
+    if type(s) ~= "string" or s == "" then return false end
+    local prev = 0
+    for tok in s:gmatch("[^%.]+") do
+        prev = prev + (tonumber(tok, 36) or 0)
+        if prev >= id then return prev == id end
+    end
+    return false
 end
 
 -- {{itemID, qty}, ...} <-> "itemB36:qty,itemB36:qty"
@@ -698,8 +717,11 @@ LookingForWorkDB = {
                                             r = { {itemID, qty}, ... }, o = outputItemID,
                                             q = "Anvil", d = description, full = true } } } },
     players   = { [guid] = { guid, name, class, guild, rev, updated, mine,
-                             profs = { [profKey] = { lvl, max, scanned, known = { [recipeID] = true } } } } },
+                             profs = { [profKey] = { lvl, max, scanned,
+                                       k = "known recipe ids, compact (nil = not scanned)",
+                                       n = number of known recipes } } } },
     sync      = { lastQuery, lastSent = { [guid] = rev }, lastAutoShare },
+    minimap   = { minimapPos, hide },       -- minimap button (LibDBIcon)
     collapsed = { [profKey] = { [categoryName] = true } },
     icons, skillLines, positions
 }
@@ -720,6 +742,7 @@ function LFW:InitDB()
         if db.settings[k] == nil then db.settings[k] = v end
     end
     db.positions  = tbl(db.positions)
+    db.minimap    = tbl(db.minimap)        -- minimap button: { minimapPos = angle, hide = bool }
     db.collapsed  = tbl(db.collapsed)
     db.catalog    = tbl(db.catalog)
     db.players    = tbl(db.players)
@@ -755,13 +778,21 @@ function LFW:InitDB()
                 if not PROF_BY_KEY[k] or type(p) ~= "table" then
                     rec.profs[k] = nil
                 else
-                    if p.known ~= nil then p.known = tbl(p.known) end
+                    -- before 1.3.0 known recipes were a Lua table; now a compact string
+                    if type(p.known) == "table" then
+                        p.k = ns.EncodeIds(p.known)
+                        p.n = ns.CountKeys(p.known)
+                    end
+                    p.known = nil
+                    if type(p.k) ~= "string" then p.k = nil end
+                    p.n = p.k and (tonumber(p.n) or ns.CountIds(p.k)) or nil
                 end
             end
         end
     end
     self.db = db
     self.index = {}
+    self.crafterCache = {}
     self.indexDirty = true
 end
 
@@ -931,14 +962,7 @@ end
 function LFW:DataChanged(mine)
     self.indexDirty = true
     if mine and self.ScheduleAutoShare then self:ScheduleAutoShare() end
-    if self.RequestUIRefresh then self:RequestUIRefresh() end
-end
-
-local function SetsEqual(a, b)
-    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
-    for k in pairs(a) do if not b[k] then return false end end
-    for k in pairs(b) do if not a[k] then return false end end
-    return true
+    if self.RequestUIRefresh then self:RequestUIRefresh(false, mine and 0.15 or 1.5) end
 end
 
 -- Profession levels from the profession list (works without opening windows)
@@ -1162,9 +1186,10 @@ function LFW:ScanOpenTradeSkill()
         local me = self:GetMe()
         if me then
             local p = me.profs[prof.key] or {}
-            local changed = not me.profs[prof.key] or not SetsEqual(p.known, known)
+            local encoded = ns.EncodeIds(known)
+            local changed = not me.profs[prof.key] or p.k ~= encoded
                 or (lvl > 0 and p.lvl ~= lvl) or (max > 0 and p.max ~= max)
-            p.known = known
+            p.k, p.n = encoded, ns.CountKeys(known)
             if lvl > 0 then p.lvl = lvl end
             if max > 0 then p.max = max end
             p.scanned = time()
@@ -1196,7 +1221,7 @@ function LFW:StoreLinkedProfession(linkedName, prof, known, lvl, max)
     rec.name, rec.class = m.name, m.class or rec.class
     if self.guildKey then rec.guild = self.guildKey end
     local p = rec.profs[prof.key] or {}
-    p.known = known
+    p.k, p.n = ns.EncodeIds(known), ns.CountKeys(known)
     if lvl > 0 then p.lvl = lvl end
     if max > 0 then p.max = max end
     p.scanned = time()
@@ -1247,38 +1272,97 @@ function LFW:OnRecipeLearned(recipeID)
         end
         pcall(ReadRecipeDetails, recipeID, entry)
     end
-    if p.known and p.known[recipeID] then return end
-    p.known = p.known or {}
-    p.known[recipeID] = true
+    if ns.IdsHas(p.k, recipeID) then return end
+    local set = ns.DecodeIds(p.k or "") or {}
+    set[recipeID] = true
+    p.k, p.n = ns.EncodeIds(set), ns.CountKeys(set)
     self:BumpRecord(me)
 end
 
 -------------------------------------------------------------------------------
 -- Who knows what
 -------------------------------------------------------------------------------
--- recipeID -> { record, ... } for the current guild (rebuilt when data changes)
-function LFW:GetCrafterIndex(key)
+-- Per profession, only two numbers per recipe are kept: how many guild members
+-- know it and how many of them are online. The names behind a recipe are looked
+-- up when you click or hover it (GetCrafters), which keeps memory small even
+-- in very large guilds.
+--   { n = { [recipeID] = count }, on = { [recipeID] = online count },
+--     members = { [guid] = true }, online = { [guid] = true } }
+function LFW:InvalidateIndex()
+    self.indexDirty = true
+end
+
+function LFW:GetRecipeCounts(key)
     if self.indexDirty then
         wipe(self.index)
+        wipe(self.crafterCache)
         self.indexDirty = false
     end
     local idx = self.index[key]
     if idx then return idx end
-    idx = {}
-    for _, rec in pairs(self.db.players) do
-        if self:IsCurrentGuildRecord(rec) then
-            local p = rec.profs[key]
-            if p and p.known then
-                for id in pairs(p.known) do
-                    local list = idx[id]
-                    if not list then list = {}; idx[id] = list end
-                    list[#list + 1] = rec
-                end
+    idx = { n = {}, on = {}, members = {}, online = {} }
+    for guid, rec in pairs(self.db.players) do
+        local p = rec.profs[key]
+        if p and p.k and p.k ~= "" and self:IsCurrentGuildRecord(rec) then
+            local isOnline = self:IsOnline(rec)
+            idx.members[guid] = true
+            if isOnline then idx.online[guid] = true end
+            local prev = 0
+            for tok in p.k:gmatch("[^%.]+") do
+                prev = prev + (tonumber(tok, 36) or 0)
+                idx.n[prev] = (idx.n[prev] or 0) + 1
+                if isOnline then idx.on[prev] = (idx.on[prev] or 0) + 1 end
             end
         end
     end
     self.index[key] = idx
     return idx
+end
+
+-- Someone came online or went offline: adjust the online counts of the
+-- professions already counted instead of recounting everything.
+function LFW:UpdateOnlineCounts()
+    if self.indexDirty then return end
+    for key, idx in pairs(self.index) do
+        for guid, rec in pairs(self.db.players) do
+            local p = rec.profs[key]
+            if p and p.k and p.k ~= "" then
+                local inGuild = self:IsCurrentGuildRecord(rec)
+                if inGuild ~= (idx.members[guid] == true) then
+                    self.indexDirty = true       -- someone joined or left: recount
+                    return
+                end
+                if inGuild then
+                    local isOnline = self:IsOnline(rec) and true or nil
+                    if isOnline ~= idx.online[guid] then
+                        local delta = isOnline and 1 or -1
+                        local prev = 0
+                        for tok in p.k:gmatch("[^%.]+") do
+                            prev = prev + (tonumber(tok, 36) or 0)
+                            idx.on[prev] = math.max(0, (idx.on[prev] or 0) + delta)
+                        end
+                        idx.online[guid] = isOnline
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Guild members who know one recipe (cached until data changes)
+function LFW:GetCrafters(key, id)
+    self:GetRecipeCounts(key)            -- clears the cache if data changed
+    local cacheKey = key .. ":" .. id
+    local list = self.crafterCache[cacheKey]
+    if list then return list end
+    list = {}
+    for guid in pairs(self.index[key].members) do
+        local rec = self.db.players[guid]
+        local p = rec and rec.profs[key]
+        if p and ns.IdsHas(p.k, id) then list[#list + 1] = rec end
+    end
+    self.crafterCache[cacheKey] = list
+    return list
 end
 
 -- Guild records that have the profession (with or without a shared recipe list)
@@ -1347,7 +1431,7 @@ function handlers.GUILD_ROSTER_UPDATE()
     LFW:RefreshGuild()
     LFW:GetMe()
     LFW:UpdateRoster()
-    LFW.indexDirty = true
+    LFW:UpdateOnlineCounts()
     if LFW.RequestUIRefresh then LFW:RequestUIRefresh() end
 end
 

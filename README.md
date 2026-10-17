@@ -28,7 +28,7 @@ A WoW Forever addon for finding who in your guild can craft a recipe, whether th
    ```
 2. `/reload` or restart the game.
 
-The Ace3 libraries it needs (LibStub, CallbackHandler, AceComm-3.0 with ChatThrottleLib, AceSerializer-3.0) are included in the `Libs` folder, so nothing else has to be installed.
+The libraries it needs (LibStub, CallbackHandler, AceComm-3.0 with ChatThrottleLib, AceSerializer-3.0, LibCompress, LibDataBroker-1.1 and LibDBIcon-1.0) are included in the `Libs` folder, so nothing else has to be installed. See *Libraries and licences* below.
 
 ## Getting started
 
@@ -47,6 +47,7 @@ The Ace3 libraries it needs (LibStub, CallbackHandler, AceComm-3.0 with ChatThro
 - **Learning a recipe isn't the same as having the list.** Learning a profession or recipe with the window closed only saves the recipe's name. These name-only entries don't count toward a list's size, so a full list from someone who has opened the window always replaces them.
 - **Automatic sharing**: when your own professions change (new recipe, skill-up, newly scanned profession), your data is shared once, a minute later, and at most once every 5 minutes. Turned off by Ignore Queries.
 - Members only ever send **their own characters' data**, never other people's.
+- **Recipe lists are sent compressed** when the member who asked for them can read compressed lists (version 1.3.0 and later). A 592-recipe Leatherworking list goes out as about 12 KB instead of 46 KB: roughly 49 addon messages instead of 186, and about a quarter of the time. Compression is done by the game itself (LibCompress uses the game's built-in Deflate), so it costs almost no CPU. Older versions are still sent plain lists. Member data is already small and is never compressed.
 - Messages are queued through ChatThrottleLib (part of Ace3), which keeps the send rate under the game's limits. Nothing is sent during combat; it waits until combat ends.
 - Your own alts in the same guild are shared too, so guild mates can see what your offline alts can craft.
 
@@ -75,6 +76,16 @@ Hover either line for a breakdown: each reagent's price (and whether it's a vend
 
 Prices come from the same places as AH Lookup: `Auctionator.API.v1.GetAuctionPriceByItemID` (and `GetVendorPriceByItemID`), falling back to Auctionator's saved price table.
 
+## Libraries and licences
+
+| Library | Used for | Licence |
+|---|---|---|
+| LibStub, CallbackHandler-1.0, AceComm-3.0 (with ChatThrottleLib), AceSerializer-3.0 | guild messages | Ace3 licence (BSD-style, `Libs/Ace3-LICENSE.txt`) |
+| LibCompress | compressing recipe lists | GNU GPL v2 (`Libs/LibCompress/LICENSE`) |
+| LibDataBroker-1.1, LibDBIcon-1.0 | minimap button | see each library |
+
+LibCompress is licensed under the GPL v2. If you publish Looking For Work, check that the licence you publish it under is compatible with that. LibDeflate (zlib licence) can replace it if needed; only the compression calls in `Comm.lua` would change.
+
 ## Names
 
 WoW Forever names are "First-name Last-name". On WoW Forever `UnitName()` returns the first name and surname as two separate values, so Looking For Work joins them (or uses `GetUnitName()`) to always save the complete name. Members are matched by their character GUID, so names with spaces or hyphenated last names are never a problem. Names and classes are kept in step with the guild roster.
@@ -88,11 +99,22 @@ WoW Forever names are "First-name Last-name". On WoW Forever `UnitName()` return
 | `/lfw find <text>` | Search every profession (names, tooltip text, reagents, players); opens the one with the most matches |
 | `/lfw update` | Ask your guild for their professions (same as the Update button) |
 | `/lfw ignore` | Turn Ignore Queries on/off |
+| `/lfw minimap` | Show / hide the minimap button |
 | `/lfw options` | Open the Options tab |
 | `/lfw debug` | Show version, saved counts, and turn debug messages on/off |
 | `/lfw help` | Show help |
 
-Looking For Work also appears in the game's **Options → AddOns** list and in the addon compartment (the button by the minimap).
+### Minimap button
+
+A blank-note button sits on the edge of the minimap, like other addons' buttons:
+
+- **Left-click**: open or close Looking For Work (same as `/lfw`)
+- **Right-click**: ask your guild for updates (same as `/lfw update`); the result is shown in chat
+- **Drag**: move it anywhere around the minimap; the spot is remembered
+
+Hovering it shows these three actions, and how long until you can ask your guild again if Update is on cooldown. `/lfw minimap` hides or shows it. Minimap button collector addons can manage it too, since it's a standard LibDataBroker launcher.
+
+Looking For Work also appears in the game's **Options → AddOns** list and in the addon compartment (the button by the minimap), where left-click and right-click work the same way.
 
 ## Tips
 
@@ -119,7 +141,9 @@ LookingForWorkDB = {
     },
     players  = {   -- by character GUID
         ["Player-1234-0ABCDEF1"] = { name = "John Smith", class = "MAGE", guild = "Realm|Guild", rev = 7,
-                                     profs = { enchanting = { lvl = 24, max = 75, known = { [1230643] = true } } } },
+                                     profs = { enchanting = { lvl = 24, max = 75,
+                                                              k = "1cq7.8.2t9...",   -- known recipes, compact
+                                                              n = 70 } } },          -- how many
     },
     sync = { lastQuery = ..., lastSent = { ... } },
     collapsed, icons, positions,
@@ -127,6 +151,19 @@ LookingForWorkDB = {
 ```
 
 ## Changes
+
+**1.3.0**
+- New minimap button: left-click opens Looking For Work, right-click asks your guild for updates, drag to move it around the minimap. Its tooltip lists all three.
+- The addon's icon in the AddOns list and the minimap button use icon 1505929 (Inv_misc_noteblank2b).
+- Recipe lists are sent compressed (LibCompress, using the game's built-in Deflate) to members who can read them, about 4 times smaller and faster to share. Older versions are still sent plain lists, so mixed guilds keep working.
+- `/lfw minimap` shows or hides the button.
+- The addon compartment entry now works the same way (right-click asks for updates).
+- Uses far less memory in large guilds. In a 1,000-member guild where everyone knows every recipe, memory drops from about 60–100 MB to about 11–13 MB, and the SavedVariables file shrinks by a similar proportion.
+  - Each member's known recipes are stored in the same compact form used to send them to guild members (about 2–4 KB per member instead of about 40 KB). Saved data from earlier versions is converted automatically at login.
+  - For the recipe list, only two numbers are kept per recipe (how many crafters, how many online). Names are looked up when you click or hover a recipe.
+  - When guild members log on or off, online counts are adjusted rather than recounted.
+- Long crafter lists and the Guild Members list on the Options tab only create rows for what's on screen, so a recipe with 1,000 crafters opens without a stutter.
+- Fully compatible with guild members on 1.2.x: nothing about the messages between versions changed. Going back to an earlier version after installing this one needs **Forget** then **Update** on the Options tab, because older versions can't read the compact saved data.
 
 **1.2.2**
 - Author listed as MendeleevForever.

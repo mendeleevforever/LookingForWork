@@ -17,6 +17,10 @@
 --                 who planned to send the same list stand down.
 --   C  catalog    a full recipe list (names, categories, reagents, icons) for
 --                 one profession; only sent when the asker's list is smaller.
+--   Z  compressed a recipe list (C) compressed with LibCompress (Deflate, done by
+--                 the game itself through C_EncodingUtil). Only sent when every
+--                 request that triggered the list said it can read it (z = 1),
+--                 so older versions keep getting plain C messages.
 --   R  request    "please send your Tailoring recipe list" to one member. Sent
 --                 automatically when their data arrives (D carries the size of
 --                 the sender's recipe lists) and my list for that profession is
@@ -30,6 +34,8 @@ local LFW = ns.LFW
 
 local AceComm    = LibStub("AceComm-3.0")
 local Serializer = LibStub("AceSerializer-3.0")
+local LibCompress = LibStub("LibCompress", true)
+local Encoder     = LibCompress and LibCompress:GetAddonEncodeTable()   -- escapes \000 for the addon channel
 AceComm:Embed(LFW)
 
 local COMM_PREFIX             = "LookingForWork"   -- max 16 characters
@@ -46,6 +52,9 @@ local AUTO_SHARE_MIN_INTERVAL = 300    -- at most one automatic share per 5 minu
 local MAX_CHARS_PER_MSG       = 12
 local CATALOG_CHUNK           = 120    -- recipes per C message
 local MAX_MSG_BYTES           = 250000
+local COMPRESSED_MARK         = "Z:"   -- compressed messages start with this (AceSerializer output starts with "^1")
+local MAX_COMPRESSED_BYTES    = 49152  -- a 600-recipe list is about 12 KB compressed
+local MAX_DECOMPRESSED_BYTES  = 524288
 local REQUEST_DELAY_MIN       = 2      -- wait before asking for a recipe list...
 local REQUEST_DELAY_MAX       = 6      -- ...so someone else's ask can cover it
 local REQUEST_RETRY           = 600    -- ask for the same recipe list at most every 10 min
@@ -71,18 +80,32 @@ function LFW:InitComm()
     self.commReady = true
 end
 
+-- Can this client compress and decompress recipe lists?
+function LFW:CanCompress()
+    return (LibCompress and Encoder and LibCompress.HasZlibCodecs and LibCompress:HasZlibCodecs()) and true or false
+end
+
 -- Addon messages can be blocked in combat, so they wait until combat ends.
-function LFW:SendGuild(msg, prio, queueKey)
+-- compress: send it compressed (only for receivers known to read it)
+function LFW:SendGuild(msg, prio, queueKey, compress)
     if not self.commReady or not IsInGuild() then return false end
     msg.v, msg.from = PROTOCOL, MyId()
     if InCombatLockdown() then
         queueKey = queueKey or tostring(msg)
         if not combatQueue[queueKey] then combatOrder[#combatOrder + 1] = queueKey end
-        combatQueue[queueKey] = { msg, prio }
+        combatQueue[queueKey] = { msg, prio, compress }
         return true
     end
     local ok, data = pcall(Serializer.Serialize, Serializer, msg)
     if not ok or type(data) ~= "string" then return false end
+    if compress and self:CanCompress() then
+        local packed = LibCompress:CompressDeflate(data)
+        local encoded = packed and Encoder:Encode(packed)
+        if encoded and #encoded + #COMPRESSED_MARK < #data then
+            self:Debug(("Compressed %s: %.1f KB -> %.1f KB"):format(tostring(msg.t), #data / 1024, (#encoded + 2) / 1024))
+            data = COMPRESSED_MARK .. encoded
+        end
+    end
     self:SendCommMessage(COMM_PREFIX, data, "GUILD", nil, prio or "NORMAL")
     return true
 end
@@ -93,7 +116,7 @@ function LFW:FlushCombatQueue()
     for _, key in ipairs(order) do
         local item = combatQueue[key]
         combatQueue[key] = nil
-        if item then self:SendGuild(item[1], item[2], key) end
+        if item then self:SendGuild(item[1], item[2], key, item[3]) end
     end
 end
 
@@ -120,7 +143,7 @@ local function PackRecord(rec)
     for key, prof in pairs(rec.profs) do
         p[key] = {
             l = prof.lvl, m = prof.max, s = prof.scanned,
-            k = prof.known and ns.EncodeIds(prof.known) or nil,   -- nil = recipes not scanned yet
+            k = prof.k,                 -- compact known-recipe list; nil = recipes not scanned yet
         }
     end
     return { id = rec.guid, n = rec.name, c = rec.class, r = rec.rev, u = rec.updated, p = p }
@@ -138,8 +161,10 @@ local function UnpackProfs(p)
             }
             local ok = true
             if d.k ~= nil then
-                prof.known = ns.DecodeIds(d.k)
-                ok = prof.known ~= nil
+                -- check it, then store it in the same compact (sorted) form we use
+                local set = ns.DecodeIds(d.k)
+                ok = set ~= nil
+                if ok then prof.k, prof.n = ns.EncodeIds(set), ns.CountKeys(set) end
             end
             if ok then out[key] = prof end
         end
@@ -230,7 +255,7 @@ function LFW:RequestUpdate()
     for guid, rec in pairs(self.db.players) do
         if not rec.mine and rec.guild == self.guildKey then have[ns.ShortId(guid)] = rec.rev or 0 end
     end
-    self:SendGuild({ t = "Q", h = have, c = self:CatalogCounts() }, "NORMAL", "Q")
+    self:SendGuild({ t = "Q", h = have, c = self:CatalogCounts(), z = self:CanCompress() and 1 or nil }, "NORMAL", "Q")
     self.db.sync.lastQuery = time()
     self.queryState = { time = time(), replies = {} }
     self:RequestRoster()
@@ -277,14 +302,21 @@ function LFW:NoteCatalogSent(key, size)
 end
 
 -- targeted: answering a request addressed to me (shorter wait)
-function LFW:ScheduleCatalog(key, targeted)
-    if self.pendingCatalogs[key] then return end
+-- readsCompressed: the asker can read compressed lists. If anyone who asked for
+-- this list can't, it goes out uncompressed so they can read it too.
+function LFW:ScheduleCatalog(key, targeted, readsCompressed)
+    local pending = self.pendingCatalogs[key]
+    if pending then
+        if not readsCompressed then pending.compress = false end
+        return
+    end
     if self:CatalogRecentlySent(key) then return end
     local lo, hi = CATALOG_DELAY_MIN, CATALOG_DELAY_MAX
     if targeted then lo, hi = TARGETED_DELAY_MIN, TARGETED_DELAY_MAX end
     local delay = lo + math.random() * (hi - lo)
     self.pendingCatalogs[key] = {
         timer = C_Timer.NewTimer(delay, function() self:SendCatalog(key) end),
+        compress = readsCompressed and true or false,
     }
 end
 
@@ -334,9 +366,11 @@ function LFW:CheckMissingCatalogs(chars, theirCounts, from)
         for key, prof in pairs(rec.profs) do
             -- recipes they know that my list lacks, or only has as a placeholder
             local missing = false
-            if prof.known then
+            if prof.k and prof.k ~= "" then
                 local recipes = self.db.catalog[key] and self.db.catalog[key].recipes or {}
-                for id in pairs(prof.known) do
+                local id = 0
+                for tok in prof.k:gmatch("[^%.]+") do
+                    id = id + (tonumber(tok, 36) or 0)
                     if not recipes[id] or not recipes[id].c then missing = true; break end
                 end
             end
@@ -354,7 +388,7 @@ function LFW:SendCatalogRequests()
     end
     wipe(self.pendingRequests)
     for member, keys in pairs(byMember) do
-        self:SendGuild({ t = "R", to = member, p = keys }, "NORMAL", "R" .. member)
+        self:SendGuild({ t = "R", to = member, p = keys, z = self:CanCompress() and 1 or nil }, "NORMAL", "R" .. member)
         self:Debug(("Asked for recipe lists: %s"):format(table.concat(keys, ", ")))
     end
 end
@@ -366,7 +400,7 @@ function LFW:HandleRequest(msg)
         if ns.PROF_BY_KEY[key] then
             if msg.to == ns.ShortId(UnitGUID("player")) then
                 if not self.db.settings.ignoreQueries and self:CatalogScore(key) > 0 then
-                    self:ScheduleCatalog(key, true)
+                    self:ScheduleCatalog(key, true, msg.z == 1)
                 end
             else
                 -- someone else asked for this list; their answer reaches me too
@@ -393,6 +427,8 @@ local function EntryString(id, e, catIndex)
 end
 
 function LFW:SendCatalog(key)
+    local pending = self.pendingCatalogs[key]
+    local compress = pending and pending.compress and self:CanCompress()
     self.pendingCatalogs[key] = nil
     if self.db.settings.ignoreQueries then return end
     local cat = self.db.catalog[key]
@@ -405,9 +441,11 @@ function LFW:SendCatalog(key)
     local ids = {}
     for id in pairs(cat.recipes) do ids[#ids + 1] = id end
     table.sort(ids)
-    for i = 1, #ids, CATALOG_CHUNK do
+    -- compressed: the whole list in one message (it compresses better that way)
+    local chunk = compress and math.max(#ids, 1) or CATALOG_CHUNK
+    for i = 1, #ids, chunk do
         local cats, catIndex, entries = {}, {}, {}
-        for j = i, math.min(i + CATALOG_CHUNK - 1, #ids) do
+        for j = i, math.min(i + chunk - 1, #ids) do
             local id = ids[j]
             local e = cat.recipes[id]
             local ci
@@ -421,9 +459,9 @@ function LFW:SendCatalog(key)
             end
             entries[#entries + 1] = EntryString(id, e, ci)
         end
-        self:SendGuild({ t = "C", p = key, n = count, cats = cats, e = entries }, "BULK", "C" .. key .. i)
+        self:SendGuild({ t = "C", p = key, n = count, cats = cats, e = entries }, "BULK", "C" .. key .. i, compress)
     end
-    self:Debug(("Sent the %s recipe list (%d recipes)."):format(ns.ProfName(key), count))
+    self:Debug(("Sent the %s recipe list (%d recipes%s)."):format(ns.ProfName(key), count, compress and ", compressed" or ""))
 end
 
 -------------------------------------------------------------------------------
@@ -463,7 +501,7 @@ function LFW:HandleQuery(msg)
     local theirs = type(msg.c) == "table" and msg.c or {}
     for _, p in ipairs(ns.PROFESSIONS) do
         local mine, their = self:CatalogScore(p.key), tonumber(theirs[p.key]) or 0
-        if mine > 0 and mine > their then self:ScheduleCatalog(p.key) end
+        if mine > 0 and mine > their then self:ScheduleCatalog(p.key, false, msg.z == 1) end
         -- the asker has a better list than mine: ask them for it
         if their > mine then self:WantCatalog(p.key, their, msg.from) end
     end
@@ -504,7 +542,8 @@ function LFW:HandleData(msg)
     if #received > 0 then self:CheckMissingCatalogs(received, msg.c, msg.from) end
 end
 
-function LFW:HandleCatalog(msg)
+-- compressed: arrived as one compressed message, so it may hold the whole list
+function LFW:HandleCatalog(msg, sender, compressed)
     local key = msg.p
     if not ns.PROF_BY_KEY[key] or type(msg.e) ~= "table" then return end
     self:CancelCatalog(key, msg.n)
@@ -530,7 +569,7 @@ function LFW:HandleCatalog(msg)
 
     local added, total = 0, ns.CountKeys(cat.recipes)
     for i, s in ipairs(msg.e) do
-        if i > CATALOG_CHUNK * 2 or total >= ns.MAX_RECIPES_PER_PROF then break end
+        if (not compressed and i > CATALOG_CHUNK * 2) or total >= ns.MAX_RECIPES_PER_PROF then break end
         if type(s) == "string" and #s < 600 then
             local f = {}
             for field in (s .. ";"):gmatch("([^;]*);") do f[#f + 1] = field end
@@ -572,8 +611,17 @@ end
 function LFW:OnCommReceived(prefix, data, distribution, sender)
     if prefix ~= COMM_PREFIX or distribution ~= "GUILD" or not self.db then return end
     if type(data) ~= "string" or #data > MAX_MSG_BYTES then return end
+    local compressed = false
+    if data:sub(1, #COMPRESSED_MARK) == COMPRESSED_MARK then
+        -- a compressed recipe list; damaged or oversized ones are dropped
+        if not self:CanCompress() or #data > MAX_COMPRESSED_BYTES then return end
+        local okD, raw = pcall(function() return LibCompress:DecompressDeflate(Encoder:Decode(data:sub(#COMPRESSED_MARK + 1))) end)
+        if not okD or type(raw) ~= "string" or #raw > MAX_DECOMPRESSED_BYTES then return end
+        data, compressed = raw, true
+    end
     local ok, msg = Serializer:Deserialize(data)
     if not ok or type(msg) ~= "table" then return end
+    if compressed and msg.t ~= "C" then return end      -- only recipe lists are ever compressed
     if msg.v ~= PROTOCOL then
         if tonumber(msg.v) and msg.v > PROTOCOL and not self.warnedProtocol then
             self.warnedProtocol = true
@@ -597,7 +645,7 @@ function LFW:OnCommReceived(prefix, data, distribution, sender)
         return
     end
     if handler then
-        local okH, err = pcall(handler, self, msg, sender)
+        local okH, err = pcall(handler, self, msg, sender, compressed)
         if not okH then self:Debug("message error: " .. tostring(err)) end
     end
 end

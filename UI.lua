@@ -356,13 +356,74 @@ local function MemberStatus(rec)
     return C.offline, GREY .. "Offline" .. (ago and ("  •  " .. ago) or "") .. "|r", 2
 end
 
+-- Online first, then by name. Status and names are worked out once per record
+-- (not on every comparison), which matters with hundreds of crafters.
 local function SortRecords(list)
+    local rank, lname = {}, {}
+    for _, rec in ipairs(list) do
+        local _, _, r = MemberStatus(rec)
+        rank[rec], lname[rec] = r, (rec.name or ""):lower()
+    end
     table.sort(list, function(a, b)
-        local _, _, ra = MemberStatus(a)
-        local _, _, rb = MemberStatus(b)
-        if ra ~= rb then return ra < rb end
-        return (a.name or ""):lower() < (b.name or ""):lower()
+        if rank[a] ~= rank[b] then return rank[a] < rank[b] end
+        return lname[a] < lname[b]
     end)
+    return list
+end
+
+local function CopyList(t)
+    local out = {}
+    for i = 1, #t do out[i] = t[i] end
+    return out
+end
+
+-- A scrolling list that only creates frames for the rows on screen, so a
+-- list of 1,000 crafters costs the same as a list of 20.
+--   getRow(i, peek): pooled row i (peek: return nil instead of creating)
+--   fill(row, item, index): show one item in a row
+local function AttachVirtualList(scroll, child, rowH, getRow, fill)
+    local list = { data = {} }
+    function list:Render()
+        local offset = scroll:GetVerticalScroll() or 0
+        local first = math.floor(offset / rowH) + 1
+        local visible = math.ceil((scroll:GetHeight() or 200) / rowH) + 1
+        for i = 1, visible do
+            local idx = first + i - 1
+            local item = self.data[idx]
+            local row = item and getRow(i) or getRow(i, true)
+            if row then
+                if item then
+                    row:ClearAllPoints()
+                    row:SetPoint("TOPLEFT", child, "TOPLEFT", 0, -(idx - 1) * rowH)
+                    fill(row, item, idx)
+                    row:Show()
+                else
+                    row:Hide()
+                    row.rec = nil
+                end
+            end
+        end
+        local i = visible + 1
+        local row = getRow(i, true)
+        while row do
+            row:Hide()
+            row.rec = nil
+            i = i + 1
+            row = getRow(i, true)
+        end
+    end
+    function list:SetData(data, resetScroll)
+        self.data = data
+        child:SetHeight(math.max(10, #data * rowH))
+        if resetScroll then scroll:SetVerticalScroll(0) end
+        scroll.lastOffset = nil
+        self:Render()
+    end
+    scroll:HookScript("OnUpdate", function(sf)
+        local off = sf:GetVerticalScroll()
+        if off ~= sf.lastOffset then sf.lastOffset = off; list:Render() end
+    end)
+    scroll:HookScript("OnSizeChanged", function() list:Render() end)
     return list
 end
 
@@ -387,7 +448,8 @@ local function RecipeIcon(id, e)
 end
 
 -- Returns true plus the reason when it wasn't the name ("Tooltip: ...")
-local function MatchSearch(search, id, name, e, crafters)
+-- crafterName: a matching crafter's name for this recipe (found beforehand)
+local function MatchSearch(search, id, name, e, crafterName)
     if name:lower():find(search, 1, true) then return true end
     if e and e.o then
         local n = ns.ItemName(e.o)
@@ -404,46 +466,56 @@ local function MatchSearch(search, id, name, e, crafters)
     for i, low in ipairs(tip.lower) do
         if low:find(search, 1, true) then return true, "Tooltip: " .. tip.lines[i] end
     end
-    if crafters then
-        for _, rec in ipairs(crafters) do
-            if rec.name and rec.name:lower():find(search, 1, true) then return true, "Crafter: " .. rec.name end
+    if crafterName then return true, "Crafter: " .. crafterName end
+    return false
+end
+
+-- recipeID -> name of a guild member whose name matches the search
+function LFW:RecipesByCrafterName(key, search)
+    local out = {}
+    for _, rec in pairs(self.db.players) do
+        local p = rec.profs[key]
+        if p and p.k and p.k ~= "" and rec.name and rec.name:lower():find(search, 1, true)
+            and self:IsCurrentGuildRecord(rec) then
+            local id = 0
+            for tok in p.k:gmatch("[^%.]+") do
+                id = id + (tonumber(tok, 36) or 0)
+                out[id] = out[id] or rec.name
+            end
         end
     end
-    return false
+    return out
 end
 
 -- Flat list of headers + recipes for the virtual list, plus totals for the header bar
 function LFW:BuildEntries(key, searchText)
     local cat = self.db.catalog[key]
     local recipes = cat and cat.recipes or {}
-    local index = self:GetCrafterIndex(key)
+    local counts = self:GetRecipeCounts(key)
     local s = self.db.settings
     local search = ns.Trim(searchText or ""):lower()
     local ids = {}
     for id in pairs(recipes) do ids[id] = true end
-    for id in pairs(index) do ids[id] = true end
+    for id in pairs(counts.n) do ids[id] = true end
+    local byCrafter = search ~= "" and self:RecipesByCrafterName(key, search) or {}
 
     local groups, total, known = {}, 0, 0
     for id in pairs(ids) do
         local e = recipes[id]
         local name = RecipeName(id, e)
-        local crafters = index[id]
-        local count, online = crafters and #crafters or 0, 0
-        if crafters then
-            for _, rec in ipairs(crafters) do if self:IsOnline(rec) then online = online + 1 end end
-        end
+        local count, online = counts.n[id] or 0, counts.on[id] or 0
         total = total + 1
         if count > 0 then known = known + 1 end
         local pass = true
         if not s.showUnowned and count == 0 then pass = false end
         if s.onlineOnly and online == 0 then pass = false end
         local why
-        if pass and search ~= "" then pass, why = MatchSearch(search, id, name, e, crafters) end
+        if pass and search ~= "" then pass, why = MatchSearch(search, id, name, e, byCrafter[id]) end
         if pass then
             local cname = (e and e.c) or OTHER
             local g = groups[cname]
             if not g then g = {}; groups[cname] = g end
-            g[#g + 1] = { id = id, name = name, count = count, online = online, crafters = crafters, match = why }
+            g[#g + 1] = { id = id, name = name, count = count, online = online, match = why }
         end
     end
 
@@ -548,12 +620,13 @@ function LFW:OnTick()
 end
 
 local refreshPending, detailPending = false, false
-function LFW:RequestUIRefresh(detailOnly)
+-- delay: data arriving from many guild members at once refreshes less often
+function LFW:RequestUIRefresh(detailOnly, delay)
     local f = self.frame
     if not f or not f:IsShown() then return end
     if detailOnly then detailPending = true else refreshPending = true end
     if self.refreshTimer then return end
-    self.refreshTimer = C_Timer.NewTimer(0.15, function()
+    self.refreshTimer = C_Timer.NewTimer(delay or 0.15, function()
         self.refreshTimer = nil
         local full, detail = refreshPending, detailPending
         refreshPending, detailPending = false, false
@@ -857,7 +930,7 @@ local function GetListRow(f, i)
         if e.count == 0 then
             GameTooltip:AddLine("Nobody in the guild has this recipe yet.", C.muted[1], C.muted[2], C.muted[3])
         else
-            local list = SortRecords({ unpack(e.crafters) })
+            local list = SortRecords(CopyList(LFW:GetCrafters(LFW.currentTab, e.id)))
             for i, rec in ipairs(list) do
                 if i > 8 then
                     GameTooltip:AddLine(("+ %d more"):format(#list - 8), C.muted[1], C.muted[2], C.muted[3])
@@ -948,7 +1021,7 @@ function LFW:WarmTooltipCache(key)
     for id in pairs(cat and cat.recipes or {}) do
         if not ns.HasTooltipSearch(id) then queue[#queue + 1] = id end
     end
-    for id in pairs(self:GetCrafterIndex(key)) do
+    for id in pairs(self:GetRecipeCounts(key).n) do
         if not ns.HasTooltipSearch(id) and not (cat and cat.recipes[id]) then queue[#queue + 1] = id end
     end
     if #queue == 0 then return end
@@ -1293,15 +1366,13 @@ function LFW:CreateDetail(d)
     d.craftEmpty:SetWidth(DW - 32 - 40)
 end
 
-local function GetCrafterRow(d, i)
-    if d.craftRows[i] then return d.craftRows[i] end
+local function GetCrafterRow(d, i, peek)
+    if d.craftRows[i] or peek then return d.craftRows[i] end
     local cw = DW - 32 - 24
     local row = CreateFrame("Button", nil, d.craftChild)
     row:SetSize(cw, CRAFT_ROW_H)
-    row:SetPoint("TOPLEFT", 0, -(i - 1) * CRAFT_ROW_H)
-    local bg = row:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    if i % 2 == 0 then bg:SetColorTexture(C.stripe[1], C.stripe[2], C.stripe[3], 0.22) else bg:SetColorTexture(0, 0, 0, 0) end
+    row.bg = row:CreateTexture(nil, "BACKGROUND")
+    row.bg:SetAllPoints()
     local hl = row:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
     hl:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.18)
@@ -1356,7 +1427,7 @@ function LFW:AddMemberTooltip(rec, highlightKey)
         local prof = rec.profs[p.key]
         if prof then
             local skill = SkillText(rec, p.key)
-            local recipes = prof.known and (ns.CountKeys(prof.known) .. " recipes") or "recipes not shared yet"
+            local recipes = prof.k and ((prof.n or ns.CountIds(prof.k)) .. " recipes") or "recipes not shared yet"
             local r, g, b = C.text[1], C.text[2], C.text[3]
             if p.key == highlightKey then r, g, b = 1, 0.82, 0 end
             GameTooltip:AddDoubleLine(ns.ProfName(p) .. (skill ~= "" and ("  " .. skill) or ""), recipes, r, g, b,
@@ -1372,24 +1443,34 @@ function LFW:AddMemberTooltip(rec, highlightKey)
     end
 end
 
+local function StripeRow(row, idx)
+    if idx % 2 == 0 then
+        row.bg:SetColorTexture(C.stripe[1], C.stripe[2], C.stripe[3], 0.22)
+    else
+        row.bg:SetColorTexture(0, 0, 0, 0)
+    end
+end
+
+local function FillCrafterRow(row, r, idx)
+    local rec = r.rec
+    row.rec, row.profKey = rec, r.key
+    StripeRow(row, idx)
+    local dot, status = MemberStatus(rec)
+    SetColor(row.dot, dot)
+    row.name:SetText(ns.ColorName(rec.name, rec.class))
+    row.status:SetText(r.note and (status .. GREY .. "  •  " .. r.note .. "|r") or status)
+    row.skill:SetText(SkillText(rec, r.key))
+end
+
 -- rows: { { rec = rec, note = optional status override }, ... }
-local function FillCrafters(d, rows, key, emptyText)
-    for i, r in ipairs(rows) do
-        local row = GetCrafterRow(d, i)
-        local rec = r.rec
-        row.rec, row.profKey = rec, key
-        local dot, status = MemberStatus(rec)
-        SetColor(row.dot, dot)
-        row.name:SetText(ns.ColorName(rec.name, rec.class))
-        row.status:SetText(r.note and (status .. GREY .. "  •  " .. r.note .. "|r") or status)
-        row.skill:SetText(SkillText(rec, key))
-        row:Show()
+-- resetScroll: a different recipe is shown, so start at the top
+local function FillCrafters(d, rows, key, emptyText, resetScroll)
+    if not d.craftList then
+        d.craftList = AttachVirtualList(d.craftScroll, d.craftChild, CRAFT_ROW_H,
+            function(i, peek) return GetCrafterRow(d, i, peek) end, FillCrafterRow)
     end
-    for i = #rows + 1, #d.craftRows do
-        d.craftRows[i]:Hide()
-        d.craftRows[i].rec = nil
-    end
-    d.craftChild:SetHeight(math.max(10, #rows * CRAFT_ROW_H))
+    for _, r in ipairs(rows) do r.key = key end
+    d.craftList:SetData(rows, resetScroll)
     if #rows == 0 then
         d.craftEmpty:SetText(emptyText or "")
         d.craftEmpty:Show()
@@ -1527,8 +1608,11 @@ function LFW:UpdateDetail()
     local id = self.selected[key]
     local cat = self.db.catalog[key]
     local e = id and cat and cat.recipes[id]
-    local index = self:GetCrafterIndex(key)
-    if id and not e and not index[id] then id = nil; self.selected[key] = nil end
+    local counts = self:GetRecipeCounts(key)
+    if id and not e and not counts.n[id] then id = nil; self.selected[key] = nil end
+    local shown = key .. ":" .. tostring(id)
+    local shownChanged = d.lastShown ~= shown
+    d.lastShown = shown
 
     for _, b in ipairs(d.reagents) do b:Hide() end
     d.reagNote:Hide()
@@ -1554,9 +1638,9 @@ function LFW:UpdateDetail()
         local rows = {}
         for _, rec in ipairs(members) do
             local p = rec.profs[key]
-            rows[#rows + 1] = { rec = rec, note = p.known and (ns.CountKeys(p.known) .. " recipes") or "recipes not shared yet" }
+            rows[#rows + 1] = { rec = rec, note = p.k and ((p.n or ns.CountIds(p.k)) .. " recipes") or "recipes not shared yet" }
         end
-        FillCrafters(d, rows, key, ("Nobody in the guild has shared %s yet. Press Update on the Options tab to ask."):format(ns.ProfName(key)))
+        FillCrafters(d, rows, key, ("Nobody in the guild has shared %s yet. Press Update on the Options tab to ask."):format(ns.ProfName(key)), shownChanged)
         return
     end
 
@@ -1565,7 +1649,7 @@ function LFW:UpdateDetail()
     d.iconBtn.recipeID, d.iconBtn.outItem, d.iconBtn.recipeName = id, e and e.o, name
     d.iconBtn.tex:SetTexture(RecipeIcon(id, e))
     d.name:SetText(name)
-    local crafters = index[id] and SortRecords({ unpack(index[id]) }) or {}
+    local crafters = SortRecords(CopyList(self:GetCrafters(key, id)))
     local online = 0
     for _, rec in ipairs(crafters) do if self:IsOnline(rec) then online = online + 1 end end
     local catName = (e and e.c) or OTHER
@@ -1640,9 +1724,9 @@ function LFW:UpdateDetail()
     -- members with the profession who haven't shared their recipe list yet
     for _, rec in ipairs(SortRecords(self:GetProfessionMembers(key))) do
         local p = rec.profs[key]
-        if p and not p.known then rows[#rows + 1] = { rec = rec, note = "has " .. ns.ProfName(key) .. ", recipes unknown" } end
+        if p and not p.k then rows[#rows + 1] = { rec = rec, note = "has " .. ns.ProfName(key) .. ", recipes unknown" } end
     end
-    FillCrafters(d, rows, key, "Nobody in the guild has this recipe yet.")
+    FillCrafters(d, rows, key, "Nobody in the guild has this recipe yet.", shownChanged)
 end
 
 -------------------------------------------------------------------------------
@@ -1789,15 +1873,13 @@ local function GetCharRow(ov, i)
     return row
 end
 
-local function GetMemberRow(ov, i)
-    if ov.memberRows[i] then return ov.memberRows[i] end
+local function GetMemberRow(ov, i, peek)
+    if ov.memberRows[i] or peek then return ov.memberRows[i] end
     local cw = W - 20 - OPT_RIGHT_X - 24
     local row = CreateFrame("Button", nil, ov.memberChild)
     row:SetSize(cw, MEMBER_ROW_H)
-    row:SetPoint("TOPLEFT", 0, -(i - 1) * MEMBER_ROW_H)
-    local bg = row:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    if i % 2 == 0 then bg:SetColorTexture(C.stripe[1], C.stripe[2], C.stripe[3], 0.22) else bg:SetColorTexture(0, 0, 0, 0) end
+    row.bg = row:CreateTexture(nil, "BACKGROUND")
+    row.bg:SetAllPoints()
     local hl = row:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
     hl:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.18)
@@ -1894,8 +1976,8 @@ function LFW:RefreshOptions()
                 any = true
                 local skill = SkillText(rec, p.key)
                 local state
-                if prof.known then
-                    state = Hex(C.muted) .. "—  " .. ns.CountKeys(prof.known) .. " recipes saved|r"
+                if prof.k then
+                    state = Hex(C.muted) .. "—  " .. (prof.n or ns.CountIds(prof.k)) .. " recipes saved|r"
                 else
                     state = "|cffff9040—  not saved yet: open " .. ns.ProfName(p) .. "|r"
                 end
@@ -1915,29 +1997,29 @@ function LFW:RefreshOptions()
     -- Guild members sharing data
     local members = SortRecords(self:GuildRecords())
     local online = 0
-    for i, rec in ipairs(members) do
-        local row = GetMemberRow(ov, i)
-        row.rec = rec
-        local dot = MemberStatus(rec)
-        if dot == C.online then online = online + 1 end
-        SetColor(row.dot, dot)
-        row.name:SetText(ns.ColorName(rec.name, rec.class))
-        local parts = {}
-        for _, p in ipairs(ns.PROFESSIONS) do
-            if rec.profs[p.key] then
-                local lvl = rec.profs[p.key].lvl
-                parts[#parts + 1] = p.short .. ((lvl and lvl > 0) and (" " .. lvl) or "")
-            end
-        end
-        row.profs:SetText(#parts > 0 and table.concat(parts, Hex(C.muted) .. "  •  |r") or (GREY .. "no professions|r"))
-        row.ago:SetText(self:IsMe(rec) and "you" or ns.FormatAgo(rec.updated))
-        row:Show()
+    for _, rec in ipairs(members) do
+        if MemberStatus(rec) == C.online then online = online + 1 end
     end
-    for i = #members + 1, #ov.memberRows do
-        ov.memberRows[i]:Hide()
-        ov.memberRows[i].rec = nil
+    if not ov.memberList then
+        ov.memberList = AttachVirtualList(ov.memberScroll, ov.memberChild, MEMBER_ROW_H,
+            function(i, peek) return GetMemberRow(ov, i, peek) end,
+            function(row, rec, idx)
+                row.rec = rec
+                StripeRow(row, idx)
+                SetColor(row.dot, (MemberStatus(rec)))
+                row.name:SetText(ns.ColorName(rec.name, rec.class))
+                local parts = {}
+                for _, p in ipairs(ns.PROFESSIONS) do
+                    if rec.profs[p.key] then
+                        local lvl = rec.profs[p.key].lvl
+                        parts[#parts + 1] = p.short .. ((lvl and lvl > 0) and (" " .. lvl) or "")
+                    end
+                end
+                row.profs:SetText(#parts > 0 and table.concat(parts, Hex(C.muted) .. "  •  |r") or (GREY .. "no professions|r"))
+                row.ago:SetText(LFW:IsMe(rec) and "you" or ns.FormatAgo(rec.updated))
+            end)
     end
-    ov.memberChild:SetHeight(math.max(10, #members * MEMBER_ROW_H))
+    ov.memberList:SetData(members)
     ov.memberHeader:SetText(("Guild Members Sharing Data  " .. Hex(C.muted) .. "(%d, %d online)|r"):format(#members, online))
     if #members <= 1 then
         ov.memberEmpty:SetText(IsInGuild() and "\n\n\nNo other guild members have shared data yet. Press Update to ask the ones using Looking For Work." or "\n\n\nJoin a guild to share professions.")
@@ -1999,15 +2081,17 @@ function LFW:RegisterBlizzardOptions()
     end
 end
 
-function LookingForWork_OnAddonCompartmentClick()
-    LFW:Toggle()
+-- The addon compartment (button by the minimap) works like the minimap button
+function LookingForWork_OnAddonCompartmentClick(_, mouseButton)
+    if mouseButton == "RightButton" then LFW:UpdateFromShortcut() else LFW:Toggle() end
 end
 
 function LookingForWork_OnAddonCompartmentEnter(_, button)
     local owner = button or (GetMouseFoci and GetMouseFoci()[1]) or UIParent
     GameTooltip:SetOwner(owner, "ANCHOR_LEFT")
     GameTooltip:AddLine("Looking For Work", 1, 0.82, 0)
-    GameTooltip:AddLine("Find guild members who can craft a recipe", 1, 1, 1)
+    GameTooltip:AddLine("|cffffd100Left-click|r  open Looking For Work", 1, 1, 1)
+    GameTooltip:AddLine("|cffffd100Right-click|r  ask your guild for updates", 1, 1, 1)
     GameTooltip:Show()
 end
 
@@ -2051,6 +2135,7 @@ function LFW:PrintHelp()
     print("  |cffffd100/lfw find <text>|r  search every profession by name, tooltip text (e.g. defense), reagent or player")
     print("  |cffffd100/lfw update|r  ask your guild for their professions")
     print("  |cffffd100/lfw ignore|r  turn Ignore Queries on/off")
+    print("  |cffffd100/lfw minimap|r  show / hide the minimap button")
     print("  |cffffd100/lfw options|r  open the Options tab")
 end
 
@@ -2066,8 +2151,11 @@ SlashCmdList["LOOKINGFORWORK"] = function(msg)
     elseif cmd == "help" or cmd == "?" then
         LFW:PrintHelp()
     elseif cmd == "update" then
-        local ok, err = LFW:RequestUpdate()
-        print(LFW.PREFIX .. (ok and "Asked your guild for their professions." or err))
+        LFW:UpdateFromShortcut()
+    elseif cmd == "minimap" then
+        local show = LFW.db.minimap.hide and true or false
+        LFW:SetMinimapButtonShown(show)
+        print(LFW.PREFIX .. "Minimap button " .. (show and "shown." or "hidden. Type /lfw minimap to show it again."))
     elseif cmd == "ignore" then
         LFW.db.settings.ignoreQueries = not LFW.db.settings.ignoreQueries
         print(LFW.PREFIX .. "Ignore Queries is now " .. (LFW.db.settings.ignoreQueries and "|cffff6040on|r." or "|cff40ff40off|r."))
@@ -2092,6 +2180,66 @@ SlashCmdList["LOOKINGFORWORK"] = function(msg)
     end
 end
 
+
+-------------------------------------------------------------------------------
+-- Minimap button (LibDataBroker launcher drawn by LibDBIcon, like other addons)
+--   left-click: open / close the window (/lfw)
+--   right-click: ask the guild for updates (/lfw update)
+--   drag: move it around the minimap (LibDBIcon saves the spot)
+-------------------------------------------------------------------------------
+local MINIMAP_ICON = 1505929   -- Inv_misc_noteblank2b
+
+-- What /lfw update does, with the result printed in chat
+function LFW:UpdateFromShortcut()
+    local ok, err = self:RequestUpdate()
+    print(self.PREFIX .. (ok and "Asked your guild for their professions." or err))
+    if self.frame and self.frame:IsShown() and self.currentTab == "options" then self:UpdateOptionsButtons() end
+end
+
+function LFW:AddShortcutTooltip(tooltip)
+    tooltip:AddLine("Looking For Work", 1, 0.82, 0)
+    tooltip:AddLine("|cffffd100Left-click|r  open Looking For Work  " .. GREY .. "(/lfw)|r", 1, 1, 1)
+    tooltip:AddLine("|cffffd100Right-click|r  ask your guild for updates  " .. GREY .. "(/lfw update)|r", 1, 1, 1)
+    tooltip:AddLine("|cffffd100Drag|r  move this button around the minimap", 1, 1, 1)
+    local wait = self.db and self:QueryCooldown() or 0
+    if not IsInGuild() then
+        tooltip:AddLine("You are not in a guild.", C.muted[1], C.muted[2], C.muted[3])
+    elseif wait > 0 then
+        tooltip:AddLine(("You can ask your guild again in %d seconds."):format(wait), C.muted[1], C.muted[2], C.muted[3])
+    end
+end
+
+function LFW:CreateMinimapButton()
+    if self.minimapIcon then return end
+    local LDB = LibStub and LibStub:GetLibrary("LibDataBroker-1.1", true)
+    local DBIcon = LibStub and LibStub:GetLibrary("LibDBIcon-1.0", true)
+    if not LDB or not DBIcon then return end
+    local launcher = LDB:NewDataObject("LookingForWork", {
+        type = "launcher",
+        text = "Looking For Work",
+        icon = MINIMAP_ICON,
+        OnClick = function(_, button)
+            if button == "RightButton" then
+                LFW:UpdateFromShortcut()
+            else
+                LFW:Toggle()
+            end
+        end,
+        OnTooltipShow = function(tooltip) LFW:AddShortcutTooltip(tooltip) end,
+    })
+    if not launcher then return end
+    DBIcon:Register("LookingForWork", launcher, self.db.minimap)
+    self.minimapIcon = DBIcon
+end
+
+function LFW:SetMinimapButtonShown(shown)
+    self.db.minimap.hide = not shown
+    if self.minimapIcon then
+        if shown then self.minimapIcon:Show("LookingForWork") else self.minimapIcon:Hide("LookingForWork") end
+    end
+end
+
 function LFW:InitUI()
     self:RegisterBlizzardOptions()
+    self:CreateMinimapButton()
 end
