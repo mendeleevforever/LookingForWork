@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.4.0"
+LFW.VERSION = "1.4.1"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -728,6 +728,7 @@ LookingForWorkDB = {
                                        n = number of known recipes } } } },
     seen      = {   -- COLLECTED data about people (not shared by their own addon), by GUID
         [guid] = { guid, name = "First Last", realm, class, gname = "Their Guild" (nil = unknown),
+                   gnone = true (known to have no guild), gt = when their guild was checked,
                    rs = "PvE"/"PvP"/"RP"/"Hardcore", fa = "Alliance"/"Horde",
                    gkey = "Realm|Guild" when they were in my guild, updated,
                    profs = { [profKey] = { lvl, max, k (nil = recipes not seen), n, partial,
@@ -837,6 +838,25 @@ function LFW:InitDB()
             if next(rec.profs) == nil then db.seen[guid] = nil end
         end
     end
+    -- Repair (1.4.1 pre-release): clicking quickly through crafters could save
+    -- one person's window under another person's record, renaming it. Names
+    -- are unique per realm, so two records with the same name on the same
+    -- realm mean one was overwritten; both are removed (they come back the
+    -- next time those people link their profession).
+    local byName = {}
+    for guid, rec in pairs(db.seen) do
+        if not rec.gkey and rec.name then
+            local key = (guid:match("^Player%-(%d+)%-") or "") .. "|" .. rec.name:lower()
+            byName[key] = byName[key] or {}
+            table.insert(byName[key], guid)
+        end
+    end
+    for _, guids in pairs(byName) do
+        if #guids > 1 then
+            for _, guid in ipairs(guids) do db.seen[guid] = nil end
+        end
+    end
+
     -- Before 1.4.0, recipes read from a guild member's profession link were kept
     -- with the data members share themselves. They are collected data, so they
     -- move to db.seen (owner data always came with a "received" time).

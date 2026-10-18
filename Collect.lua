@@ -30,6 +30,9 @@ local ADDON_NAME, ns = ...
 local LFW = ns.LFW
 
 -- How each entry was obtained
+LFW.recentLinks = {}      -- profession links clicked lately (newest last)
+local eventFrame = CreateFrame("Frame")   -- this file's events (see Setup)
+
 local SOURCES = {
     link      = "profession link",          -- a link that was opened: full recipe list
     member    = "guild directory recipes",  -- a guild member's profession opened from the directory
@@ -41,7 +44,6 @@ ns.SOURCES = SOURCES
 local MAX_OUTSIDE        = 3000   -- people outside the guild kept at most
 local LINK_REPEAT        = 600    -- ignore the same person re-linking within 10 min
 local CLICK_WINDOW       = 120    -- a link click and the window it opens belong together
-local MEMBER_WINDOW      = 60
 local DIR_REFRESH        = 600    -- re-read the directory's profession list every 10 min at most
 
 local function Now() return time() end
@@ -181,10 +183,25 @@ local function SplitRealm(full, knownRealm, guid)
     return ns.CleanName(full), nil
 end
 
--- Keep the most complete name ("First Last" beats "First")
-function LFW:SetSeenIdentity(rec, name, realm, class)
+-- Do two names belong to the same person? Equal, or one is only a first
+-- name (the game sometimes knows just that) and the first names are equal.
+local function SameName(a, b)
+    a, b = ns.NameKey(a), ns.NameKey(b)
+    if not a or not b then return false end
+    if a == b then return true end
+    if not a:find(" ", 1, true) or not b:find(" ", 1, true) then
+        return a:match("^[^ ]+") == b:match("^[^ ]+")
+    end
+    return false
+end
+ns.SameName = SameName
+
+-- Keep the most complete name ("First Last" beats "First"). authoritative:
+-- the name certainly belongs to this GUID (their own chat line, or a window
+-- that was matched to them), so it replaces whatever was saved.
+function LFW:SetSeenIdentity(rec, name, realm, class, authoritative)
     name = ns.CleanName(name)
-    if name and (not rec.name or #name >= #rec.name or not rec.name:find(" ", 1, true)) then rec.name = name end
+    if name and (authoritative or not rec.name or #name >= #rec.name or not rec.name:find(" ", 1, true)) then rec.name = name end
     if type(realm) == "string" and realm ~= "" then
         local mine = GetNormalizedRealmName and GetNormalizedRealmName()
         if realm ~= mine and realm ~= GetRealmName() then rec.realm = realm end
@@ -285,21 +302,50 @@ ns.ParseTradeLink = ParseTradeLink
 
 -- Called by the scan in Core.lua when a profession window shows someone else's
 -- profession (a link, or a guild member opened from the guild directory)
+-- The name a GUID is known by (collected record, roster, or the game)
+local function KnownNameOf(self, guid)
+    local rec = self.db.seen[guid]
+    if rec and rec.name then return rec.name end
+    local m = ns.roster.byGuid[guid]
+    if m then return m.name end
+    return (PlayerInfo(guid))
+end
+
+-- Whose profession is this window showing? Clicking through several links
+-- quickly means the window can still show an earlier person than the last
+-- click, so the window's own owner name is matched against the recent clicks.
+-- If no click matches that name, nothing is saved (better than the wrong person).
+local function WindowOwner(self, linkedName, prof)
+    local ownerName = ns.CleanName(ns.StripRealm(linkedName or ""))
+    local now = GetTime()
+    for i = #self.recentLinks, 1, -1 do
+        local l = self.recentLinks[i]
+        if l.key == prof.key and now - l.time < CLICK_WINDOW then
+            local known = KnownNameOf(self, l.guid)
+            if ownerName and known and SameName(known, ownerName) then return l.guid, l.link, ownerName end
+            -- the game didn't say whose window it is: only trust a single click
+            if not ownerName and #self.recentLinks == 1 then return l.guid, l.link, nil end
+        end
+    end
+    if ownerName then
+        local m = ns.roster.byName[ns.NameKey(ownerName) or ""]
+        if m and m.guid then return m.guid, nil, ownerName end
+    end
+    return nil
+end
+
 function LFW:StoreObservedProfession(linkedName, prof, known, lvl, max, isGuildMember)
-    local guid, link
-    local q = self.lastMemberQuery
-    if isGuildMember and q and GetTime() - q.time < MEMBER_WINDOW and q.key == prof.key then
-        guid, q.answered = q.guid, true
-        self.memberViewWorks = true
+    local guid, link, ownerName = WindowOwner(self, linkedName, prof)
+    if not ns.ValidGuid(guid) or guid == UnitGUID("player") then
+        if linkedName then self:Debug(("Couldn't tell who %s's window belongs to; not saved."):format(tostring(linkedName))) end
+        return
     end
-    local l = self.lastTradeLink
-    if not guid and l and GetTime() - l.time < CLICK_WINDOW and l.key == prof.key then guid, link = l.guid, l.link end
-    local m
-    if not guid and type(linkedName) == "string" then
-        m = ns.roster.byName[ns.NameKey(ns.StripRealm(linkedName)) or ""]
-        guid = m and m.guid
+    -- last safety net: never write one person's data into someone else's record
+    local existing = self.db.seen[guid]
+    if existing and existing.name and ownerName and not SameName(existing.name, ownerName) then
+        self:Debug(("Window shows %s but the record is %s; not saved."):format(ownerName, existing.name))
+        return
     end
-    if not ns.ValidGuid(guid) or guid == UnitGUID("player") then return end
 
     -- one of my own alts: that's owner data
     local own = self.db.players[guid]
@@ -315,9 +361,10 @@ function LFW:StoreObservedProfession(linkedName, prof, known, lvl, max, isGuildM
     end
 
     local rec = self:GetSeen(guid, true)
+    self:ApplyGuildStash(rec)
     local pname, prealm, pclass = PlayerInfo(guid)
     local name, realm = SplitRealm(linkedName, prealm, guid)
-    self:SetSeenIdentity(rec, name or pname, realm or prealm, pclass)
+    self:SetSeenIdentity(rec, name or pname, realm or prealm, pclass, name ~= nil)
     self:TagContext(rec)
     local p = rec.profs[prof.key] or {}
     local encoded = ns.EncodeIds(known)
@@ -377,6 +424,13 @@ function LFW:NoteChatLink(guid, spell, line, link, sender, senderGuid, channel)
     local prof = ns.ResolveProfession(line)
     if not prof or not ns.ValidGuid(guid) or IsMyCharacter(self, guid) then return end
     local rec = self:GetSeen(guid, true)
+    -- their own chat line tells exactly who they are (fixes a wrong saved name)
+    local pname, prealm, pclass = PlayerInfo(guid)
+    if senderGuid == guid then
+        local name, realm = SplitRealm(sender, prealm, guid)
+        self:SetSeenIdentity(rec, name, realm, nil, true)
+    end
+    self:SetSeenIdentity(rec, (not rec.name) and pname or nil, prealm, pclass)
     local p = rec.profs[prof.key]
     local now = Now()
     if p and p.linkedAt and now - p.linkedAt < LINK_REPEAT and p.link == link then return end
@@ -385,12 +439,6 @@ function LFW:NoteChatLink(guid, spell, line, link, sender, senderGuid, channel)
     p.link, p.linkedAt, p.ch = link, now, channel
     rec.profs[prof.key] = p
     self:TagContext(rec)
-    local pname, prealm, pclass = PlayerInfo(guid)
-    if senderGuid == guid then
-        local name, realm = SplitRealm(sender, prealm, guid)
-        self:SetSeenIdentity(rec, name, realm, nil)
-    end
-    self:SetSeenIdentity(rec, (not rec.name) and pname or nil, prealm, pclass)
     if isNew then self:NoteObservation(rec, p) end     -- new: they have this profession
     rec.updated = math.max(rec.updated or 0, now)
     if isNew then
@@ -420,10 +468,186 @@ function LFW:CheckUnitGuild(unit)
     if not rec or ns.roster.byGuid[guid] then return end
     local gname = GetGuildInfo(unit)
     if Secret(gname) then return end
-    rec.gname, rec.gnone = gname, (gname == nil) or nil
+    self:SetGuildOf(guid, gname)
     self:TagContext(rec, UnitFactionGroup and UnitFactionGroup(unit))
     local name = ns.NameFromUnit(unit)
     if name then self:SetSeenIdentity(rec, name, nil, select(2, UnitClass(unit))) end
+end
+
+-------------------------------------------------------------------------------
+-- Their guild, when their profession is opened
+-------------------------------------------------------------------------------
+-- The game can't tell someone's guild from their ID alone, and a profession
+-- window doesn't show it, so when someone's profession is opened:
+--   1. if they're near me (nameplate, target, group), it's read directly
+--   2. otherwise a /who for their exact name. The game only lets addons send
+--      /who right after a click, which is exactly when a profession link is
+--      opened (clicked in chat, or right-clicked in a crafter list). /who only
+--      finds people who are online.
+local WHO_TIMEOUT = 5      -- give up waiting for /who results
+local WHO_GAP     = 6      -- the server only answers one /who every few seconds
+
+-- Record someone's guild (nil = no guild) and when it was checked. A change is
+-- shared with guild mates like any other observation of mine.
+function LFW:SetGuildOf(guid, gname)
+    gname = (type(gname) == "string" and gname ~= "") and gname or nil
+    local rec = self.db.seen[guid]
+    if not rec then
+        -- their record is created a moment later, when the window has been read
+        self.guildStash = self.guildStash or {}
+        self.guildStash[guid] = { gname = gname or false, t = Now() }
+        return
+    end
+    local changed = rec.gname ~= gname or (gname == nil) ~= (rec.gnone == true)
+    rec.gname, rec.gnone, rec.gt = gname, (gname == nil) or nil, Now()
+    if changed and not self:InMyGuild(guid) then
+        -- re-share my own observations of them so guild mates get the guild too
+        local me = self.db.sync.observer
+        for _, p in pairs(rec.profs) do
+            if p.obs == me then
+                self.db.sync.collectRev = (self.db.sync.collectRev or 0) + 1
+                p.cr = self.db.sync.collectRev
+                if self.ScheduleSeenShare then self:ScheduleSeenShare() end
+                break
+            end
+        end
+        self:DataChanged(false)
+    end
+end
+
+-- A guild found just before their record existed
+function LFW:ApplyGuildStash(rec)
+    local stash = self.guildStash and self.guildStash[rec.guid]
+    if not stash then return end
+    self.guildStash[rec.guid] = nil
+    rec.gname, rec.gnone, rec.gt = stash.gname or nil, (not stash.gname) or nil, stash.t
+end
+
+function LFW:LookupGuildOf(guid)
+    if not ns.ValidGuid(guid) or IsMyCharacter(self, guid) or ns.roster.byGuid[guid] then return end
+    -- 1. near me: read it straight from their unit
+    if UnitTokenFromGUID then
+        local ok, unit = pcall(UnitTokenFromGUID, guid)
+        if ok and type(unit) == "string" and not Secret(unit) and UnitExists(unit) then
+            local gname = GetGuildInfo(unit)
+            if not Secret(gname) then
+                self:SetGuildOf(guid, gname)
+                return
+            end
+        end
+    end
+    -- 2. /who for their exact name
+    if not (C_FriendList and C_FriendList.SendWho) then return end
+    local rec = self.db.seen[guid]
+    local name = rec and rec.name
+    if not name then
+        local pname = PlayerInfo(guid)
+        name = pname
+    end
+    if not name then return end
+    local now = GetTime()
+    if self.whoPending and now - self.whoPending.time < WHO_TIMEOUT then return end
+    if self.lastWho and now - self.lastWho < WHO_GAP then return end
+    if self:WhoListInUse() then return end         -- don't replace your own /who list
+    -- Results go to the who list (read below) instead of chat, and whatever
+    -- shows the Who list (the Group Finder window on WoW Forever) is told to
+    -- ignore them for a moment so it doesn't pop up. Both are put back as soon
+    -- as the results are read.
+    if not self:QuietWho(true) then return end
+    local q = { guid = guid, name = name, time = now }
+    self.whoPending, self.lastWho = q, now
+    if not pcall(C_FriendList.SendWho, ('n-"%s"'):format(name)) then
+        self.whoPending = nil
+        self:QuietWho(false)
+        return
+    end
+    C_Timer.After(WHO_TIMEOUT, function()
+        if self.whoPending == q then
+            self.whoPending = nil
+            self:QuietWho(false)
+        end
+    end)
+end
+
+-- The frames (other than mine) that react to who results, wherever the game
+-- keeps its Who list (it moved from the Friends window to the Group Finder)
+local function WhoListeners()
+    local out = {}
+    if GetFramesRegisteredForEvent then
+        local ok, list = pcall(function() return { GetFramesRegisteredForEvent("WHO_LIST_UPDATE") } end)
+        if ok then
+            for _, f in ipairs(list) do
+                if f ~= eventFrame and type(f) == "table" then out[#out + 1] = f end
+            end
+        end
+    end
+    return out
+end
+
+-- Is the Who list (or the window that holds it) open? Then it's yours.
+function LFW:WhoListInUse()
+    if InCombatLockdown() then return true end
+    for _, name in ipairs({ "PVEFrame", "WhoFrame", "FriendsFrame" }) do
+        local f = _G[name]
+        if type(f) == "table" and f.IsVisible and f:IsVisible() then return true end
+    end
+    for _, f in ipairs(WhoListeners()) do
+        if f.IsVisible and f:IsVisible() then return true end
+    end
+    return false
+end
+
+-- on: our /who is about to run, so mute everything that would show its
+-- results; off: put everything back. Returns false if it couldn't mute
+-- (then the /who isn't sent).
+function LFW:QuietWho(on)
+    if on then
+        local muted = {}
+        for _, f in ipairs(WhoListeners()) do
+            if f.UnregisterEvent and pcall(f.UnregisterEvent, f, "WHO_LIST_UPDATE") then muted[#muted + 1] = f end
+        end
+        -- could anything still react? (only when the game can't list them)
+        if not GetFramesRegisteredForEvent then
+            for _, name in ipairs({ "PVEFrame", "WhoFrame", "FriendsFrame" }) do
+                local f = _G[name]
+                if type(f) == "table" and f.UnregisterEvent and pcall(f.UnregisterEvent, f, "WHO_LIST_UPDATE") then muted[#muted + 1] = f end
+            end
+        end
+        self.mutedWho = muted
+        if C_FriendList.SetWhoToUi then pcall(C_FriendList.SetWhoToUi, true) end
+        if #muted > 0 then
+            local names = {}
+            for _, f in ipairs(muted) do names[#names + 1] = (f.GetName and f:GetName()) or "?" end
+            self:Debug("Quiet /who: muted " .. table.concat(names, ", "))
+        end
+        return true
+    end
+    if C_FriendList.SetWhoToUi then pcall(C_FriendList.SetWhoToUi, false) end
+    for _, f in ipairs(self.mutedWho or {}) do
+        if f.RegisterEvent then pcall(f.RegisterEvent, f, "WHO_LIST_UPDATE") end
+    end
+    self.mutedWho = nil
+end
+
+function LFW:OnWhoResults()
+    local q = self.whoPending
+    if not q then return end
+    self.whoPending = nil
+    local ok, count = pcall(C_FriendList.GetNumWhoResults)
+    -- read the results before letting the Who list see who results again
+    C_Timer.After(0, function() LFW:QuietWho(false) end)
+    if not ok then return end
+    local want = ns.NameKey(q.name)
+    for i = 1, math.min(tonumber(count) or 0, 50) do
+        local okI, info = pcall(C_FriendList.GetWhoInfo, i)
+        if okI and type(info) == "table" and type(info.fullName) == "string" and not Secret(info.fullName)
+            and ns.NameKey(ns.StripRealm(info.fullName)) == want then
+            self:SetGuildOf(q.guid, info.fullGuildName)
+            self:Debug(("%s's guild: %s"):format(q.name, (info.fullGuildName and info.fullGuildName ~= "") and info.fullGuildName or "none"))
+            return
+        end
+    end
+    -- not found: offline, so their guild stays as it was
 end
 
 -------------------------------------------------------------------------------
@@ -530,7 +754,7 @@ end
 -------------------------------------------------------------------------------
 -- Setup
 -------------------------------------------------------------------------------
-local frame = CreateFrame("Frame")
+local frame = eventFrame
 frame:SetScript("OnEvent", function(_, event, ...)
     if not LFW.db then return end
     if CHAT_EVENTS[event] ~= nil then
@@ -540,6 +764,8 @@ frame:SetScript("OnEvent", function(_, event, ...)
         if LFW.readingDirectory or (LFW.dirReadAt and GetTime() - LFW.dirReadAt < 2) then return end
         if LFW.dirReadTimer then LFW.dirReadTimer:Cancel() end
         LFW.dirReadTimer = C_Timer.NewTimer(1, function() LFW.dirReadTimer = nil; LFW:ReadGuildDirectory() end)
+    elseif event == "WHO_LIST_UPDATE" then
+        LFW:OnWhoResults()
     elseif event == "UPDATE_MOUSEOVER_UNIT" then
         LFW:CheckUnitGuild("mouseover")
     elseif event == "PLAYER_TARGET_CHANGED" then
@@ -566,7 +792,7 @@ function LFW:InitCollect()
     end
     for event in pairs(CHAT_EVENTS) do pcall(frame.RegisterEvent, frame, event) end
     for _, event in ipairs({ "GUILD_TRADESKILL_UPDATE",
-                             "UPDATE_MOUSEOVER_UNIT", "PLAYER_TARGET_CHANGED" }) do
+                             "UPDATE_MOUSEOVER_UNIT", "PLAYER_TARGET_CHANGED", "WHO_LIST_UPDATE" }) do
         pcall(frame.RegisterEvent, frame, event)
     end
     -- remember which profession link was clicked, so the window it opens can
@@ -576,7 +802,16 @@ function LFW:InitCollect()
             if Secret(link) then return end
             local guid, _, line, clean = ParseTradeLink(link)
             local prof = guid and ns.ResolveProfession(line)
-            if prof then LFW.lastTradeLink = { guid = guid, key = prof.key, link = clean, time = GetTime() } end
+            if prof then
+                LFW.lastTradeLink = { guid = guid, key = prof.key, link = clean, time = GetTime() }
+                local recent = LFW.recentLinks
+                recent[#recent + 1] = LFW.lastTradeLink
+                while #recent > 10 do table.remove(recent, 1) end
+                -- their profession is being opened: find out their guild now
+                -- (/who is only allowed during a click like this one)
+                local ok, err = pcall(LFW.LookupGuildOf, LFW, guid)
+                if not ok then LFW:Debug("guild lookup: " .. tostring(err)) end
+            end
         end)
     end
     C_Timer.After(45, function()

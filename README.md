@@ -76,7 +76,7 @@ Looking For Work also collects profession data about people who don't run it. Th
 - On WoW Forever the directory reports skill 1 for everyone, so its skill isn't used. Its "open this member's profession" doesn't open anything, and its "who knows this recipe?" question stops being answered after a few minutes of use, so neither is used either.
 
 **What each collected entry records**
-- Who it's about: First-name Last-name, realm (if not yours), class, faction and ruleset, and their guild if known (guild mates' guild is always known; for others it's filled in when you target or mouse over them).
+- Who it's about: First-name Last-name, realm (if not yours), class, faction and ruleset, and their guild if known, with the date it was checked. Guild mates' guild is always known. For others it's checked when you open their profession: read directly if they're near you (nameplate, target, group), otherwise with a quiet `/who` for their exact name (no Who window, nothing in chat), which only finds them while they're online. Targeting or mousing over them updates it too.
 - How it was obtained (profession link, guild directory, guild directory recipes, linked in chat) and the channel for chat links.
 - When it was last updated, who collected it, and when they last linked their profession.
 - Hover a crafter to see all of it.
@@ -188,6 +188,10 @@ LookingForWorkDB = {
 ```
 
 ## Changes
+
+**1.4.1**
+- Opening the profession of a crafter outside your guild now updates their guild: read directly if they're near you, otherwise with a `/who` for their exact name (the game only lets addons use `/who` right after a click, such as opening a link; it only finds people who are online). The `/who` runs quietly: the Who list (in the Group Finder window on WoW Forever) doesn't open and nothing is printed in chat, and it's skipped while the Group Finder window is open or you're in combat. The date it was checked is shown in their tooltip, and a changed guild is shared with guild mates.
+- Fix: right-clicking quickly through crafters could save one person's profession (and name and guild) under another person, or save it twice. The window's owner is now matched to the right click by name, and nothing is saved if it can't be told. Names from a person's own chat line now correct a wrong saved name. Records already damaged this way (two records with the same name on one realm) are removed once at login; they come back the next time those people link their profession.
 
 **1.4.0**
 - **Crafters who don't use the addon**, kept as collected data separate from what members share (the owner's own data always wins):

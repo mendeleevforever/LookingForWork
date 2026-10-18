@@ -1490,6 +1490,7 @@ function LFW:AddMemberTooltip(rec, highlightKey)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Collected data (they don't share it themselves)", C.outside[1], C.outside[2], C.outside[3])
         local guildText = rec.gname and ("<" .. rec.gname .. ">") or (rec.gnone and "no guild" or "unknown")
+        if rec.gt then guildText = guildText .. GREY .. "  (checked " .. ns.FormatDate(rec.gt) .. ")|r" end
         GameTooltip:AddDoubleLine("Guild", guildText, C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
         if rec.realm then GameTooltip:AddDoubleLine("Realm", rec.realm, C.muted[1], C.muted[2], C.muted[3], 1, 1, 1) end
         local rs, fa = self:ContextOf(rec)

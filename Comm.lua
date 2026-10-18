@@ -647,7 +647,7 @@ local function PackSeen(rec, since, me)
     end
     if not any then return nil end
     return { id = rec.guid, n = rec.name, rl = rec.realm, c = rec.class, g = rec.gname, gn = rec.gnone and 1 or nil,
-             rs = rec.rs, fa = rec.fa, p = p }
+             gt = rec.gt, rs = rec.rs, fa = rec.fa, p = p }
 end
 
 -- Send my own observations of people outside the guild made after number `since`
@@ -759,11 +759,22 @@ function LFW:HandleSeen(msg)
                     end
                 end
             end
+            -- their guild: taken when their guild was checked more recently
+            -- than mine (even if their recipes weren't newer)
+            local gt = ClampNum(e.gt, 0, now)
+            if rec and gt and gt > (rec.gt or 0) then
+                if e.g then rec.gname, rec.gnone = CleanText(e.g, 60), nil
+                elseif e.gn == 1 then rec.gname, rec.gnone = nil, true end
+                rec.gt, changed = gt, true
+            end
             if accepted then
                 local class = type(e.c) == "string" and e.c:match("^%u+$") and #e.c < 20 and e.c or nil
                 self:SetSeenIdentity(rec, CleanText(e.n), CleanText(e.rl, 40), class)
-                if e.g then rec.gname, rec.gnone = CleanText(e.g, 60), nil
-                elseif e.gn == 1 then rec.gname, rec.gnone = nil, true end
+                if not rec.gt or (gt and gt >= rec.gt) then
+                    if e.g then rec.gname, rec.gnone = CleanText(e.g, 60), nil
+                    elseif e.gn == 1 then rec.gname, rec.gnone = nil, true end
+                    rec.gt = gt or rec.gt
+                end
                 -- ruleset and faction: as sent, otherwise mine (a guild mate on
                 -- my ruleset and faction only sends people who match theirs)
                 local ctx = self:MyContext()
