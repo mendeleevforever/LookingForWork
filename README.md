@@ -59,7 +59,37 @@ The game lists every recipe of a profession in its profession window, including 
 
 Until then the tab shows the recipes known by members who have shared their data, plus a note on how to get the full list.
 
-Click a profession link someone posts in chat: when it opens, Looking For Work also saves the recipe list from it, and if the person is a guild member, which recipes they know.
+Opening someone's profession link, or a guild member's profession from the guild directory, also saves its full recipe list (see below).
+
+## Crafters who don't use the addon
+
+Looking For Work also collects profession data about people who don't run it. This **collected data** is kept separately from what members share themselves, and the owner's own data always wins: collected data is only used for a profession where the person hasn't shared a recipe list.
+
+**Profession links**
+- Links posted in chat (Trade, General, guild, whispers, party, raid...) are noticed automatically: Looking For Work saves who has which profession, the channel, and the link itself. WoW Forever's links only say whose profession it is, not which recipes they know, so nothing more can be read without opening it.
+- When you open a link (click it in chat, or right-click the person in a crafter list), their full recipe list and skill are read, including the recipes they don't know. Guild members' links work the same way, so asking a guild mate without the addon to link their profession fills in their recipes.
+
+**The game's guild directory** (guild members only, addon or not)
+- Which guild members have which profession, **offline members included**. It's read shortly after login and whenever you open the window (at most every 10 minutes). The directory only lists offline members while "show offline members" is on, and only under an expanded profession, so Looking For Work switches that on and opens each profession for a moment while reading, then puts everything back.
+- It covers the nine main professions; Cooking, First Aid and Fishing aren't in the directory.
+- Members found this way are listed under each profession, and under a recipe as "has Enchanting, recipes unknown" until their recipes are known (for example from a profession link).
+- On WoW Forever the directory reports skill 1 for everyone, so its skill isn't used. Its "open this member's profession" doesn't open anything, and its "who knows this recipe?" question stops being answered after a few minutes of use, so neither is used either.
+
+**What each collected entry records**
+- Who it's about: First-name Last-name, realm (if not yours), class, faction and ruleset, and their guild if known (guild mates' guild is always known; for others it's filled in when you target or mouse over them).
+- How it was obtained (profession link, guild directory, guild directory recipes, linked in chat) and the channel for chat links.
+- When it was last updated, who collected it, and when they last linked their profession.
+- Hover a crafter to see all of it.
+
+**Crafters outside the guild**
+- Only people on the **same ruleset (PvE, PvP, RP or Hardcore) and faction** as the character you're logged in on are shown, because nobody else can trade or craft with you. Switching characters switches who you see. Each person is tagged when they're seen: the ruleset of the realm you're on, and their faction from their race (or yours, since chat and links only reach your faction). People whose ruleset or faction can't be told are left out. The Options tab shows how many are hidden.
+- They appear in blue: a "+2" next to a recipe's crafter count, and an "Outside your guild" section in the crafter list showing their guild (if known) and when they were seen.
+- **Filter → Include crafters outside the guild** hides or shows them.
+
+**Sharing collected data**
+- Data you collect about people **outside** the guild is shared with guild mates who use 1.4.0 or later, labelled with who collected it. Only people on the same ruleset and faction as the character you're on are sent, since those are the only ones your guild mates can deal with. Data about guild members isn't shared, because their own addon or the guild directory is the better source.
+- It's shared in increments ("everything after number N"), so nothing is sent twice. Each entry keeps the date it was observed, and a received entry only replaces yours if it's newer, so old data never overwrites new data. Dates in the future are treated as "now", so a wrong clock can't block later updates.
+- Ignore Queries also stops sharing collected data. **Forget** next to *Outside your guild* on the Options tab (or `/lfw forget outside`) deletes it.
 
 ## Crafting cost and profit (Auctionator)
 
@@ -100,6 +130,7 @@ WoW Forever names are "First-name Last-name". On WoW Forever `UnitName()` return
 | `/lfw update` | Ask your guild for their professions (same as the Update button) |
 | `/lfw ignore` | Turn Ignore Queries on/off |
 | `/lfw minimap` | Show / hide the minimap button |
+| `/lfw forget outside` | Forget crafters collected from outside your guild |
 | `/lfw options` | Open the Options tab |
 | `/lfw debug` | Show version, saved counts, and turn debug messages on/off |
 | `/lfw help` | Show help |
@@ -124,7 +155,7 @@ Looking For Work also appears in the game's **Options → AddOns** list and in t
   - Typing a guild mate's name shows everything they can make.
 - **Filter**: show or hide recipes nobody has, show only recipes with an online crafter, expand or collapse all categories.
 - Click a selected recipe again to go back to the profession overview, which lists every guild member with that profession, their skill and how many recipes they have shared.
-- Click a crafter to whisper them. Shift-click a recipe, its icon or a reagent to link it in chat.
+- Click a crafter to whisper them; right-click to open their profession from their saved link. Shift-click a recipe, its icon or a reagent to link it in chat.
 - Members who have a profession but haven't shared their recipes yet are listed under a recipe as "has Enchanting, recipes unknown".
 
 ## Saved data
@@ -145,12 +176,31 @@ LookingForWorkDB = {
                                                               k = "1cq7.8.2t9...",   -- known recipes, compact
                                                               n = 70 } } },          -- how many
     },
-    sync = { lastQuery = ..., lastSent = { ... } },
+    seen = {       -- collected data, by character GUID
+        ["Player-9-00ABCDEF"] = { name = "Tessa Reed", realm = "OtherRealm", class = "PRIEST", gname = "Their Guild",
+                                  updated = 1792000000,
+                                  profs = { enchanting = { k = "...", n = 2, t = 1792000000, src = "link",
+                                                           by = "John Smith", link = "trade:...", ch = "Trade" } } },
+    },
+    sync = { lastQuery = ..., lastSent = { ... }, observer = "...", collectRev = 12, collectSeen = { ... } },
     collapsed, icons, positions,
 }
 ```
 
 ## Changes
+
+**1.4.0**
+- **Crafters who don't use the addon**, kept as collected data separate from what members share (the owner's own data always wins):
+  - Profession links posted in chat are noticed automatically (profession, channel, link). Opening a link saves the person's full recipe list.
+  - The game's guild directory: which guild members have which profession, offline members included (read automatically).
+  - Right-click a crafter to open their profession from their saved link.
+  - Each entry records who it's about (First-name Last-name, realm, class, guild if known), how and when it was obtained, and who collected it.
+- **Crafters outside your guild** show in blue in recipe lists and crafter lists, with their guild and the date they were seen. Only those on the same ruleset (PvE, PvP, RP, Hardcore) and faction as your current character are shown. Filter option to hide them.
+- **Sharing collected data**: what you collect about people outside the guild is shared with guild mates on 1.4.0 or later, in increments, and only ever replaces older data.
+- Guild member data that 1.3.0 saved from profession links is moved to collected data automatically.
+- When every recipe is hidden, the list says which filter or search is hiding them.
+- Fix: all addon messages are sent at one priority, so pieces of long messages can no longer arrive interleaved and garbled.
+- Compatible with 1.2.x and 1.3.0: they ignore the new messages and keep sharing as before.
 
 **1.3.0**
 - New minimap button: left-click opens Looking For Work, right-click asks your guild for updates, drag to move it around the minimap. Its tooltip lists all three.

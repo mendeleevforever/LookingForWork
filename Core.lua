@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.3.0"
+LFW.VERSION = "1.4.0"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -169,6 +169,12 @@ function ns.FormatAgo(t)
     end
     local days = math.floor(d / 86400)
     return days == 1 and "1 day ago" or ("%d days ago"):format(days)
+end
+
+-- "Oct 16, 2026"
+function ns.FormatDate(t)
+    if type(t) ~= "number" or t <= 0 then return "unknown date" end
+    return date("%b %d, %Y", t)
 end
 
 -- The unique part of a player GUID ("Player-1234-0ABCDEF1" -> "0ABCDEF1")
@@ -720,7 +726,17 @@ LookingForWorkDB = {
                              profs = { [profKey] = { lvl, max, scanned,
                                        k = "known recipe ids, compact (nil = not scanned)",
                                        n = number of known recipes } } } },
-    sync      = { lastQuery, lastSent = { [guid] = rev }, lastAutoShare },
+    seen      = {   -- COLLECTED data about people (not shared by their own addon), by GUID
+        [guid] = { guid, name = "First Last", realm, class, gname = "Their Guild" (nil = unknown),
+                   rs = "PvE"/"PvP"/"RP"/"Hardcore", fa = "Alliance"/"Horde",
+                   gkey = "Realm|Guild" when they were in my guild, updated,
+                   profs = { [profKey] = { lvl, max, k (nil = recipes not seen), n, partial,
+                                           t = when this was observed, src = how,
+                                           by = "First Last" who collected it, obs = their addon id,
+                                           cr = my collection revision (my own observations),
+                                           link = "trade:...", linkedAt, ch = channel } } } },
+    sync      = { lastQuery, lastSent = { [guid] = rev }, lastAutoShare,
+                  observer = "my addon id", collectRev, collectSent, collectSeen = { [observer] = rev } },
     minimap   = { minimapPos, hide },       -- minimap button (LibDBIcon)
     collapsed = { [profKey] = { [categoryName] = true } },
     icons, skillLines, positions
@@ -730,6 +746,7 @@ local DEFAULT_SETTINGS = {
     ignoreQueries = false,   -- the Options "Ignore Queries" checkbox (default unchecked)
     showUnowned   = true,    -- list recipes nobody in the guild has
     onlineOnly    = false,   -- list only recipes with an online crafter
+    showOutside   = true,    -- include crafters outside the guild (collected data)
     debug         = false,
 }
 
@@ -750,6 +767,16 @@ function LFW:InitDB()
     db.sync.lastSent = tbl(db.sync.lastSent)
     db.icons      = tbl(db.icons)
     db.skillLines = tbl(db.skillLines)
+    db.seen       = tbl(db.seen)
+    db.realmRules = tbl(db.realmRules)      -- [server id] = "PvP" etc., learned from my characters
+    db.dirChecked = nil      -- recipe questions to the guild directory aren't answered on WoW Forever
+    db.sync.collectSeen = tbl(db.sync.collectSeen)
+    db.sync.collectRev  = tonumber(db.sync.collectRev) or 0
+    db.sync.collectSent = tonumber(db.sync.collectSent) or 0
+    -- a random id for my collected data (12 hex digits; small numbers keep %x safe)
+    if type(db.sync.observer) ~= "string" or not db.sync.observer:match("^%x+$") or #db.sync.observer > 16 then
+        db.sync.observer = ("%04x%04x%04x"):format(math.random(0, 0xffff), math.random(0, 0xffff), math.random(0, 0xffff))
+    end
 
     for key, cat in pairs(db.catalog) do
         if not PROF_BY_KEY[key] or type(cat) ~= "table" then
@@ -790,6 +817,42 @@ function LFW:InitDB()
             end
         end
     end
+    -- seen (collected) records
+    for guid, rec in pairs(db.seen) do
+        if type(rec) ~= "table" or not ns.ValidGuid(guid) then
+            db.seen[guid] = nil
+        else
+            rec.guid, rec.seen = guid, true
+            rec.profs = tbl(rec.profs)
+            for k, p in pairs(rec.profs) do
+                if not PROF_BY_KEY[k] or type(p) ~= "table" then
+                    rec.profs[k] = nil
+                else
+                    if type(p.k) ~= "string" then p.k = nil end
+                    p.n = p.k and (tonumber(p.n) or ns.CountIds(p.k)) or nil
+                    -- the guild directory's skill is always 1 on WoW Forever
+                    if p.lvl == 1 and (p.src == "directory" or p.checked) then p.lvl = nil end
+                end
+            end
+            if next(rec.profs) == nil then db.seen[guid] = nil end
+        end
+    end
+    -- Before 1.4.0, recipes read from a guild member's profession link were kept
+    -- with the data members share themselves. They are collected data, so they
+    -- move to db.seen (owner data always came with a "received" time).
+    for guid, rec in pairs(db.players) do
+        if not rec.mine and not rec.received and not db.seen[guid] then
+            local moved = { guid = guid, seen = true, name = rec.name, class = rec.class,
+                            gkey = rec.guild, updated = rec.updated, profs = {} }
+            for k, p in pairs(rec.profs) do
+                moved.profs[k] = { lvl = p.lvl, max = p.max, k = p.k, n = p.n,
+                                   t = p.scanned or rec.updated, src = "link" }
+            end
+            db.seen[guid] = moved
+            db.players[guid] = nil
+        end
+    end
+
     self.db = db
     self.index = {}
     self.crafterCache = {}
@@ -893,6 +956,13 @@ function LFW:UpdateRoster()
         end
     end
     roster.loaded = roster.total > 0
+    -- changes when someone joins or leaves (not when they log on or off)
+    local sig = roster.total
+    for guid in pairs(roster.byGuid) do
+        sig = (sig + (tonumber(ns.ShortId(guid) or "0", 16) or 0)) % 2147483647
+    end
+    roster.membershipChanged = roster.signature ~= nil and roster.signature ~= sig
+    roster.signature = sig
 
     -- Keep stored names / classes in step with the roster
     for guid, rec in pairs(self.db.players) do
@@ -1111,11 +1181,14 @@ function LFW:ScanOpenTradeSkill()
     if not (T and T.GetAllRecipeIDs and T.GetRecipeInfo) or not self.db then return end
     if T.IsTradeSkillReady and not T.IsTradeSkillReady() then return end
     if T.IsNPCCrafting and SafeCall(T.IsNPCCrafting) then return end
-    if T.IsTradeSkillGuild and SafeCall(T.IsTradeSkillGuild) then return end
+    -- a guild member's recipes opened from the guild directory read like a link
+    local isGuildMember = T.IsTradeSkillGuildMember and SafeCall(T.IsTradeSkillGuildMember) and true or false
+    if not isGuildMember and T.IsTradeSkillGuild and SafeCall(T.IsTradeSkillGuild) then return end
     if T.IsRuneforging and SafeCall(T.IsRuneforging) then return end
 
     local isLinked, linkedName = false, nil
     if T.IsTradeSkillLinked then isLinked, linkedName = SafeCall(T.IsTradeSkillLinked) end
+    if isGuildMember then isLinked = true end
 
     local ids = SafeCall(T.GetAllRecipeIDs)
     if type(ids) ~= "table" or #ids == 0 then return end
@@ -1181,7 +1254,9 @@ function LFW:ScanOpenTradeSkill()
 
     local lvl, max = Levels(base, child)
     if isLinked then
-        self:StoreLinkedProfession(linkedName, prof, known, lvl, max)
+        if self.StoreObservedProfession then
+            self:StoreObservedProfession(linkedName, prof, known, lvl, max, isGuildMember)
+        end
     else
         local me = self:GetMe()
         if me then
@@ -1206,32 +1281,6 @@ function LFW:ScanOpenTradeSkill()
     if (added > 0 or upgraded > 0) and isLinked then self:DataChanged(false) end
     self:Debug(("Scanned %s: %d recipes listed, %d known%s."):format(prof.name, #ids, ns.CountKeys(known),
         isLinked and (" (linked by " .. tostring(linkedName) .. ")") or ""))
-end
-
--- A profession link a guild member posted in chat: save which recipes they know
-function LFW:StoreLinkedProfession(linkedName, prof, known, lvl, max)
-    if type(linkedName) ~= "string" then return end
-    local m = roster.byName[NameKey(StripRealm(linkedName)) or ""]
-    if not m or not m.guid or not ns.ValidGuid(m.guid) or m.guid == UnitGUID("player") then return end
-    local rec = self.db.players[m.guid]
-    if not rec then
-        rec = { guid = m.guid, rev = 0, profs = {}, updated = time() }
-        self.db.players[m.guid] = rec
-    end
-    rec.name, rec.class = m.name, m.class or rec.class
-    if self.guildKey then rec.guild = self.guildKey end
-    local p = rec.profs[prof.key] or {}
-    p.k, p.n = ns.EncodeIds(known), ns.CountKeys(known)
-    if lvl > 0 then p.lvl = lvl end
-    if max > 0 then p.max = max end
-    p.scanned = time()
-    rec.profs[prof.key] = p
-    if rec.mine then
-        self:BumpRecord(rec)    -- one of my own alts: share it like my own data
-    else
-        rec.updated = math.max(rec.updated or 0, time())
-        self:DataChanged(false)
-    end
 end
 
 local scanTimer
@@ -1282,12 +1331,70 @@ end
 -------------------------------------------------------------------------------
 -- Who knows what
 -------------------------------------------------------------------------------
--- Per profession, only two numbers per recipe are kept: how many guild members
--- know it and how many of them are online. The names behind a recipe are looked
--- up when you click or hover it (GetCrafters), which keeps memory small even
--- in very large guilds.
---   { n = { [recipeID] = count }, on = { [recipeID] = online count },
---     members = { [guid] = true }, online = { [guid] = true } }
+-- Two kinds of data describe a person:
+--   * db.players: what their own addon shared (or my own characters)
+--   * db.seen:    what was COLLECTED about them (profession links, the guild
+--                 directory, or guild mates' collections) - see Collect.lua
+-- The owner's own data always wins. Collected data is used for a profession
+-- only where the owner hasn't shared a recipe list for it.
+function LFW:SourceFor(guid, key)
+    local own = self.db.players[guid]
+    local op = own and own.profs[key]
+    if op and op.k then return own, op end
+    local seen = self.db.seen[guid]
+    local sp = seen and seen.profs[key]
+    if sp and (sp.k or not op) then return seen, sp end
+    if op then return own, op end
+    return nil
+end
+
+-- Is this person in my guild right now?
+function LFW:InMyGuild(guid)
+    if guid == UnitGUID("player") then return true end
+    local own = self.db.players[guid]
+    if own and own.mine and not self.guildKey then return true end
+    if not self.guildKey then return false end
+    if roster.loaded then return roster.byGuid[guid] ~= nil end
+    if own and own.guild == self.guildKey then return true end
+    local seen = self.db.seen[guid]
+    return seen ~= nil and seen.gkey == self.guildKey
+end
+
+-- Everyone with data: owner records first, then collected-only people
+local function ForEachPerson(db, fn)
+    for guid in pairs(db.players) do fn(guid) end
+    for guid in pairs(db.seen) do
+        if not db.players[guid] then fn(guid) end
+    end
+end
+
+function LFW:ForEachPerson(fn)
+    ForEachPerson(self.db, fn)
+end
+
+-- The record to show for a guild member / outsider with this profession
+function LFW:PersonFor(guid, key)
+    local rec, p = self:SourceFor(guid, key)
+    if not rec then return nil end
+    local inGuild = self:InMyGuild(guid)
+    if rec.seen then
+        if not inGuild then
+            if self.db.settings.showOutside == false then return nil end
+            -- only people this character can trade and craft with
+            if self.ContextMatches and not self:ContextMatches(rec) then return nil end
+        end
+        return rec, p, inGuild
+    end
+    if inGuild and self:IsCurrentGuildRecord(rec) then return rec, p, true end
+    return nil          -- owner data of someone who left the guild
+end
+
+-- Per profession, only a few numbers per recipe are kept: how many guild
+-- members know it, how many of them are online, and how many people outside
+-- the guild. The names behind a recipe are looked up when you click or hover
+-- it (GetCrafters), which keeps memory small even in very large guilds.
+--   { n = {[id] = count}, on = {[id] = online}, x = {[id] = outside count},
+--     members = {[guid] = true}, outside = {[guid] = true}, online = {[guid] = true} }
 function LFW:InvalidateIndex()
     self.indexDirty = true
 end
@@ -1300,21 +1407,28 @@ function LFW:GetRecipeCounts(key)
     end
     local idx = self.index[key]
     if idx then return idx end
-    idx = { n = {}, on = {}, members = {}, online = {} }
-    for guid, rec in pairs(self.db.players) do
-        local p = rec.profs[key]
-        if p and p.k and p.k ~= "" and self:IsCurrentGuildRecord(rec) then
-            local isOnline = self:IsOnline(rec)
+    idx = { n = {}, on = {}, x = {}, members = {}, outside = {}, online = {} }
+    ForEachPerson(self.db, function(guid)
+        local rec, p, inGuild = self:PersonFor(guid, key)
+        if not (p and p.k and p.k ~= "") then return end
+        local isOnline = inGuild and self:IsOnline(rec)
+        if inGuild then
             idx.members[guid] = true
             if isOnline then idx.online[guid] = true end
-            local prev = 0
-            for tok in p.k:gmatch("[^%.]+") do
-                prev = prev + (tonumber(tok, 36) or 0)
+        else
+            idx.outside[guid] = true
+        end
+        local prev = 0
+        for tok in p.k:gmatch("[^%.]+") do
+            prev = prev + (tonumber(tok, 36) or 0)
+            if inGuild then
                 idx.n[prev] = (idx.n[prev] or 0) + 1
                 if isOnline then idx.on[prev] = (idx.on[prev] or 0) + 1 end
+            else
+                idx.x[prev] = (idx.x[prev] or 0) + 1
             end
         end
-    end
+    end)
     self.index[key] = idx
     return idx
 end
@@ -1323,53 +1437,68 @@ end
 -- professions already counted instead of recounting everything.
 function LFW:UpdateOnlineCounts()
     if self.indexDirty then return end
+    if roster.membershipChanged then         -- someone joined or left: recount
+        self.indexDirty = true
+        return
+    end
     for key, idx in pairs(self.index) do
-        for guid, rec in pairs(self.db.players) do
-            local p = rec.profs[key]
-            if p and p.k and p.k ~= "" then
-                local inGuild = self:IsCurrentGuildRecord(rec)
-                if inGuild ~= (idx.members[guid] == true) then
-                    self.indexDirty = true       -- someone joined or left: recount
-                    return
-                end
-                if inGuild then
-                    local isOnline = self:IsOnline(rec) and true or nil
-                    if isOnline ~= idx.online[guid] then
-                        local delta = isOnline and 1 or -1
-                        local prev = 0
-                        for tok in p.k:gmatch("[^%.]+") do
-                            prev = prev + (tonumber(tok, 36) or 0)
-                            idx.on[prev] = math.max(0, (idx.on[prev] or 0) + delta)
-                        end
-                        idx.online[guid] = isOnline
+        for guid in pairs(idx.members) do
+            local rec, p = self:SourceFor(guid, key)
+            if rec and p and p.k and p.k ~= "" then
+                local isOnline = self:IsOnline(rec) and true or nil
+                if isOnline ~= idx.online[guid] then
+                    local delta = isOnline and 1 or -1
+                    local prev = 0
+                    for tok in p.k:gmatch("[^%.]+") do
+                        prev = prev + (tonumber(tok, 36) or 0)
+                        idx.on[prev] = math.max(0, (idx.on[prev] or 0) + delta)
                     end
+                    idx.online[guid] = isOnline
                 end
             end
         end
     end
 end
 
--- Guild members who know one recipe (cached until data changes)
+-- Who knows one recipe: guild members, and people outside the guild
+-- (cached until data changes)
 function LFW:GetCrafters(key, id)
-    self:GetRecipeCounts(key)            -- clears the cache if data changed
+    local idx = self:GetRecipeCounts(key)            -- clears the cache if data changed
     local cacheKey = key .. ":" .. id
-    local list = self.crafterCache[cacheKey]
-    if list then return list end
-    list = {}
-    for guid in pairs(self.index[key].members) do
-        local rec = self.db.players[guid]
-        local p = rec and rec.profs[key]
-        if p and ns.IdsHas(p.k, id) then list[#list + 1] = rec end
+    local c = self.crafterCache[cacheKey]
+    if c then return c.guild, c.outside end
+    local guild, outside = {}, {}
+    for guid in pairs(idx.members) do
+        local rec, p = self:SourceFor(guid, key)
+        if p and ns.IdsHas(p.k, id) then guild[#guild + 1] = rec end
     end
-    self.crafterCache[cacheKey] = list
-    return list
+    for guid in pairs(idx.outside) do
+        local rec, p = self:SourceFor(guid, key)
+        if p and ns.IdsHas(p.k, id) then outside[#outside + 1] = rec end
+    end
+    self.crafterCache[cacheKey] = { guild = guild, outside = outside }
+    return guild, outside
 end
 
--- Guild records that have the profession (with or without a shared recipe list)
+-- Guild members who have the profession (with or without a known recipe list)
 function LFW:GetProfessionMembers(key)
     local out = {}
-    for _, rec in pairs(self.db.players) do
-        if self:IsCurrentGuildRecord(rec) and rec.profs[key] then out[#out + 1] = rec end
+    ForEachPerson(self.db, function(guid)
+        local rec, _, inGuild = self:PersonFor(guid, key)
+        if rec and inGuild then out[#out + 1] = rec end
+    end)
+    return out
+end
+
+-- People outside the guild known to have the profession
+function LFW:GetOutsideMembers(key)
+    local out = {}
+    if self.db.settings.showOutside == false then return out end
+    for guid, rec in pairs(self.db.seen) do
+        if rec.profs[key] and not self:InMyGuild(guid) and not self.db.players[guid]
+            and (not self.ContextMatches or self:ContextMatches(rec)) then
+            out[#out + 1] = rec
+        end
     end
     return out
 end
@@ -1408,6 +1537,7 @@ function handlers.PLAYER_LOGIN()
     LFW:UpdateProfessionLevels(false)
     local ok, err = pcall(function()
         if LFW.InitComm then LFW:InitComm() end
+        if LFW.InitCollect then LFW:InitCollect() end
         if LFW.InitUI then LFW:InitUI() end
     end)
     if not ok then print(LFW.PREFIX .. "|cffff4040load error:|r " .. tostring(err)) end
@@ -1431,6 +1561,7 @@ function handlers.GUILD_ROSTER_UPDATE()
     LFW:RefreshGuild()
     LFW:GetMe()
     LFW:UpdateRoster()
+    if LFW.SyncSeenGuild then LFW:SyncSeenGuild() end
     LFW:UpdateOnlineCounts()
     if LFW.RequestUIRefresh then LFW:RequestUIRefresh() end
 end

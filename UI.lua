@@ -48,6 +48,7 @@ local C = {
     online    = { 0.25, 1.00, 0.25 },
     offline   = { 0.85, 0.65, 0.20 },
     none      = { 0.50, 0.47, 0.42 },
+    outside   = { 0.41, 0.80, 0.94 },   -- crafters outside the guild
 }
 local DOT = "   |cff7d705a•|r   "
 local GREEN, GREY, BLUE = "|cff40ff40", "|cff9d9d9d", "|cff69ccf0"
@@ -343,6 +344,11 @@ end
 local function MemberStatus(rec)
     if LFW:IsMe(rec) then return C.online, GREEN .. "Online|r " .. GREY .. "(you)|r", 0 end
     local m = LFW:MemberInfo(rec)
+    if not m and rec.seen and not LFW:InMyGuild(rec.guid) then
+        -- outside the guild: their guild (if known) and when they were last seen
+        local g = rec.gname and ("<" .. rec.gname .. ">") or (rec.gnone and "no guild" or "guild unknown")
+        return C.outside, BLUE .. g .. "|r" .. GREY .. "  •  seen " .. ns.FormatDate(rec.updated) .. "|r", 4
+    end
     if not m then
         if rec.mine then return C.none, GREY .. "Your character|r", 2 end
         return C.none, GREY .. "Not in guild roster|r", 3
@@ -473,17 +479,16 @@ end
 -- recipeID -> name of a guild member whose name matches the search
 function LFW:RecipesByCrafterName(key, search)
     local out = {}
-    for _, rec in pairs(self.db.players) do
-        local p = rec.profs[key]
-        if p and p.k and p.k ~= "" and rec.name and rec.name:lower():find(search, 1, true)
-            and self:IsCurrentGuildRecord(rec) then
+    self:ForEachPerson(function(guid)
+        local rec, p = self:PersonFor(guid, key)
+        if p and p.k and p.k ~= "" and rec.name and rec.name:lower():find(search, 1, true) then
             local id = 0
             for tok in p.k:gmatch("[^%.]+") do
                 id = id + (tonumber(tok, 36) or 0)
                 out[id] = out[id] or rec.name
             end
         end
-    end
+    end)
     return out
 end
 
@@ -497,17 +502,18 @@ function LFW:BuildEntries(key, searchText)
     local ids = {}
     for id in pairs(recipes) do ids[id] = true end
     for id in pairs(counts.n) do ids[id] = true end
+    for id in pairs(counts.x) do ids[id] = true end
     local byCrafter = search ~= "" and self:RecipesByCrafterName(key, search) or {}
 
     local groups, total, known = {}, 0, 0
     for id in pairs(ids) do
         local e = recipes[id]
         local name = RecipeName(id, e)
-        local count, online = counts.n[id] or 0, counts.on[id] or 0
+        local count, online, outside = counts.n[id] or 0, counts.on[id] or 0, counts.x[id] or 0
         total = total + 1
         if count > 0 then known = known + 1 end
         local pass = true
-        if not s.showUnowned and count == 0 then pass = false end
+        if not s.showUnowned and count == 0 and outside == 0 then pass = false end
         if s.onlineOnly and online == 0 then pass = false end
         local why
         if pass and search ~= "" then pass, why = MatchSearch(search, id, name, e, byCrafter[id]) end
@@ -515,7 +521,7 @@ function LFW:BuildEntries(key, searchText)
             local cname = (e and e.c) or OTHER
             local g = groups[cname]
             if not g then g = {}; groups[cname] = g end
-            g[#g + 1] = { id = id, name = name, count = count, online = online, match = why }
+            g[#g + 1] = { id = id, name = name, count = count, online = online, outside = outside, match = why }
         end
     end
 
@@ -570,6 +576,7 @@ function LFW:CreateMainFrame()
     f:SetScript("OnShow", function()
         LFW:RequestRoster()
         LFW:UpdateRoster()
+        LFW:RequestGuildDirectory(false)
         LFW.indexDirty = true
         LFW:SelectTab(LFW.currentTab or LFW:DefaultTab())
         f.ticker = C_Timer.NewTicker(1, function() LFW:OnTick() end)
@@ -927,10 +934,11 @@ local function GetListRow(f, i)
         if e.match then
             GameTooltip:AddLine("Found by search  —  " .. e.match, 1, 0.82, 0, true)
         end
+        local guildList, outsideList = LFW:GetCrafters(LFW.currentTab, e.id)
         if e.count == 0 then
             GameTooltip:AddLine("Nobody in the guild has this recipe yet.", C.muted[1], C.muted[2], C.muted[3])
         else
-            local list = SortRecords(CopyList(LFW:GetCrafters(LFW.currentTab, e.id)))
+            local list = SortRecords(CopyList(guildList))
             for i, rec in ipairs(list) do
                 if i > 8 then
                     GameTooltip:AddLine(("+ %d more"):format(#list - 8), C.muted[1], C.muted[2], C.muted[3])
@@ -938,6 +946,18 @@ local function GetListRow(f, i)
                 end
                 local dot = MemberStatus(rec)
                 GameTooltip:AddLine(Hex(dot) .. "•|r " .. ns.ColorName(rec.name, rec.class))
+            end
+        end
+        if e.outside > 0 then
+            GameTooltip:AddLine("Outside your guild:", C.outside[1], C.outside[2], C.outside[3])
+            local list = SortRecords(CopyList(outsideList))
+            for i, rec in ipairs(list) do
+                if i > 4 then
+                    GameTooltip:AddLine(("+ %d more"):format(#list - 4), C.muted[1], C.muted[2], C.muted[3])
+                    break
+                end
+                GameTooltip:AddLine(Hex(C.outside) .. "•|r " .. ns.ColorName(rec.name, rec.class)
+                    .. (rec.gname and (GREY .. "  <" .. rec.gname .. ">|r") or ""))
             end
         end
         GameTooltip:AddLine("Click for reagents and crafters", C.muted[1], C.muted[2], C.muted[3])
@@ -971,12 +991,19 @@ local function FillRow(row, e, selectedId)
     row.sel:SetShown(selected)
     row.selBar:SetShown(selected)
     row.text:SetText(e.name)
+    local plus = (e.outside or 0) > 0 and (Hex(C.outside) .. "+" .. e.outside .. "|r") or ""
     if e.count > 0 then
         SetColor(row.text, selected and { 1, 1, 1 } or C.text)
         row.dot:Show()
         SetColor(row.dot, e.online > 0 and C.online or C.offline)
-        row.count:SetText(tostring(e.count))
+        row.count:SetText(e.count .. (plus ~= "" and (" " .. plus) or ""))
         SetColor(row.count, e.online > 0 and { 0.55, 0.9, 0.55 } or C.muted)
+    elseif (e.outside or 0) > 0 then
+        -- only people outside the guild have it
+        SetColor(row.text, selected and { 1, 1, 1 } or C.text)
+        row.dot:Show()
+        SetColor(row.dot, C.outside)
+        row.count:SetText(plus)
     else
         SetColor(row.text, selected and { 0.85, 0.85, 0.85 } or C.none)
         row.dot:Hide()
@@ -1077,7 +1104,9 @@ function LFW:RefreshProfession(fromSearch)
     local members = self:GetProfessionMembers(key)
     local online = 0
     for _, rec in ipairs(members) do if self:IsOnline(rec) then online = online + 1 end end
-    pv.stats:SetText(("%d %s%s%d online"):format(#members, #members == 1 and "crafter" or "crafters", "   •   ", online))
+    local outsideN = #self:GetOutsideMembers(key)
+    pv.stats:SetText(("%d %s%s%d online"):format(#members, #members == 1 and "crafter" or "crafters", "   •   ", online)
+        .. (outsideN > 0 and ("   •   " .. Hex(C.outside) .. outsideN .. " outside the guild|r") or ""))
 
     -- empty list message
     if #entries == 0 then
@@ -1085,7 +1114,13 @@ function LFW:RefreshProfession(fromSearch)
         if total == 0 then
             f.listEmpty:SetText(("No %s recipes saved yet.\n\nOpen %s on any character that knows it, or press Update on the Options tab to get the recipe list from your guild."):format(name, name))
         else
-            f.listEmpty:SetText("No recipes match your search or filter.")
+            -- say which filter is hiding everything
+            local why = {}
+            if ns.Trim(f.search:GetText()) ~= "" then why[#why + 1] = "your search" end
+            if self.db.settings.onlineOnly then why[#why + 1] = "\"Only recipes with an online crafter\"" end
+            if not self.db.settings.showUnowned then why[#why + 1] = "\"Show recipes nobody has\" being off" end
+            f.listEmpty:SetText("No recipes match " .. (#why > 0 and table.concat(why, " and ") or "your search or filter") .. "."
+                .. (self.db.settings.onlineOnly and "\n\nCrafters outside the guild never count as online. Change this under Filter." or ""))
         end
         f.listEmpty:Show()
     else
@@ -1146,6 +1181,7 @@ end
 local FILTER_ITEMS = {
     { text = "Show recipes nobody has", setting = "showUnowned" },
     { text = "Only recipes with an online crafter", setting = "onlineOnly" },
+    { text = "Include crafters outside the guild", setting = "showOutside" },
     { separator = true },
     { text = "Expand all categories", action = function() LFW:SetAllCollapsed(false) end },
     { text = "Collapse all categories", action = function() LFW:SetAllCollapsed(true) end },
@@ -1209,6 +1245,7 @@ function LFW:CreateDropList()
                 local it = self.item
                 if it.setting then
                     LFW.db.settings[it.setting] = not LFW.db.settings[it.setting]
+                    LFW:InvalidateIndex()
                     LFW:UpdateDropList()
                     LFW:RefreshProfession()
                 else
@@ -1393,19 +1430,32 @@ local function GetCrafterRow(d, i, peek)
     row.skill:SetPoint("RIGHT", -6, 0)
     row.skill:SetJustifyH("RIGHT")
     SetColor(row.skill, C.legend)
-    row:RegisterForClicks("LeftButtonUp")
-    row:SetScript("OnClick", function(self)
+    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    row:SetScript("OnClick", function(self, button)
         local rec = self.rec
         if not rec or LFW:IsMe(rec) then return end
+        if button == "RightButton" then
+            if not LFW:OpenProfessionOf(rec, self.profKey) then
+                print(LFW.PREFIX .. "There's no way to open " .. (rec.name or "their") .. "'s " .. ns.ProfName(self.profKey) .. " right now.")
+            end
+            return
+        end
         local m = LFW:MemberInfo(rec)
-        Whisper((m and m.raw) or rec.name)
+        local target = (m and m.raw) or rec.name
+        if rec.seen and not m and rec.realm then target = rec.name .. "-" .. rec.realm end
+        Whisper(target)
     end)
     row:SetScript("OnEnter", function(self)
         local rec = self.rec
         if not rec then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         LFW:AddMemberTooltip(rec, self.profKey)
-        if not LFW:IsMe(rec) then GameTooltip:AddLine("Click to whisper", C.muted[1], C.muted[2], C.muted[3]) end
+        if not LFW:IsMe(rec) then
+            GameTooltip:AddLine("Click to whisper", C.muted[1], C.muted[2], C.muted[3])
+            if LFW:CanOpenProfessionOf(rec, self.profKey) then
+                GameTooltip:AddLine("Right-click to open their " .. ns.ProfName(self.profKey), C.muted[1], C.muted[2], C.muted[3])
+            end
+        end
         GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -1427,19 +1477,51 @@ function LFW:AddMemberTooltip(rec, highlightKey)
         local prof = rec.profs[p.key]
         if prof then
             local skill = SkillText(rec, p.key)
-            local recipes = prof.k and ((prof.n or ns.CountIds(prof.k)) .. " recipes") or "recipes not shared yet"
+            local recipes = prof.k and ((prof.n or ns.CountIds(prof.k)) .. (prof.partial and " recipes found" or " recipes"))
+                or (rec.seen and "recipes not seen yet" or "recipes not shared yet")
             local r, g, b = C.text[1], C.text[2], C.text[3]
             if p.key == highlightKey then r, g, b = 1, 0.82, 0 end
             GameTooltip:AddDoubleLine(ns.ProfName(p) .. (skill ~= "" and ("  " .. skill) or ""), recipes, r, g, b,
                 C.muted[1], C.muted[2], C.muted[3])
         end
     end
-    if self:IsMe(rec) then
+    if rec.seen then
+        -- collected data: who it's about, how and when it was obtained, by whom
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Collected data (they don't share it themselves)", C.outside[1], C.outside[2], C.outside[3])
+        local guildText = rec.gname and ("<" .. rec.gname .. ">") or (rec.gnone and "no guild" or "unknown")
+        GameTooltip:AddDoubleLine("Guild", guildText, C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+        if rec.realm then GameTooltip:AddDoubleLine("Realm", rec.realm, C.muted[1], C.muted[2], C.muted[3], 1, 1, 1) end
+        local rs, fa = self:ContextOf(rec)
+        if rs or fa then
+            GameTooltip:AddDoubleLine("Plays on", (fa or "?") .. "  •  " .. (rs or "?"), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+        end
+        GameTooltip:AddDoubleLine("Last updated", ns.FormatDate(rec.updated), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+        for _, prof in ipairs(ns.PROFESSIONS) do
+            local p = rec.profs[prof.key]
+            if p and (highlightKey == nil or prof.key == highlightKey) then
+                local how = ns.SOURCES[p.src] or "collected"
+                if p.src == "chat" and p.ch then how = how .. " (" .. p.ch .. ")" end
+                GameTooltip:AddLine(("%s: %s, %s%s"):format(ns.ProfName(prof), how, ns.FormatDate(p.t),
+                    p.by and (", by " .. p.by) or ""), 1, 1, 1, true)
+                if p.partial then
+                    GameTooltip:AddLine("  Only recipes checked in the guild directory so far", C.muted[1], C.muted[2], C.muted[3], true)
+                elseif not p.k then
+                    GameTooltip:AddLine("  Recipes not seen yet" .. (p.link and ": right-click to open their profession" or ""),
+                        C.muted[1], C.muted[2], C.muted[3], true)
+                end
+                if p.link and p.linkedAt and p.src ~= "chat" then
+                    GameTooltip:AddLine("  Last linked " .. ns.FormatDate(p.linkedAt) .. (p.ch and (" in " .. p.ch) or ""),
+                        C.muted[1], C.muted[2], C.muted[3], true)
+                end
+            end
+        end
+    elseif self:IsMe(rec) then
         GameTooltip:AddLine("Your current character", C.muted[1], C.muted[2], C.muted[3])
     elseif rec.mine then
         GameTooltip:AddLine("Your character  •  saved " .. ns.FormatAgo(rec.updated), C.muted[1], C.muted[2], C.muted[3])
     else
-        GameTooltip:AddLine("Data from " .. ns.FormatAgo(rec.updated), C.muted[1], C.muted[2], C.muted[3])
+        GameTooltip:AddLine("Shared by their own addon  •  " .. ns.FormatAgo(rec.updated), C.muted[1], C.muted[2], C.muted[3])
     end
 end
 
@@ -1452,6 +1534,16 @@ local function StripeRow(row, idx)
 end
 
 local function FillCrafterRow(row, r, idx)
+    if r.header then
+        row.rec, row.profKey = nil, r.key
+        row.bg:SetColorTexture(0, 0, 0, 0)
+        row.dot:SetText("")
+        row.name:SetText(Hex(C.outside) .. r.header .. "|r")
+        row.status:SetText("")
+        row.skill:SetText("")
+        return
+    end
+    row.dot:SetText("•")
     local rec = r.rec
     row.rec, row.profKey = rec, r.key
     StripeRow(row, idx)
@@ -1640,6 +1732,14 @@ function LFW:UpdateDetail()
             local p = rec.profs[key]
             rows[#rows + 1] = { rec = rec, note = p.k and ((p.n or ns.CountIds(p.k)) .. " recipes") or "recipes not shared yet" }
         end
+        local outside = SortRecords(self:GetOutsideMembers(key))
+        if #outside > 0 then
+            rows[#rows + 1] = { header = ("Outside your guild (%d)"):format(#outside) }
+            for _, rec in ipairs(outside) do
+                local p = rec.profs[key]
+                rows[#rows + 1] = { rec = rec, note = p.k and ((p.n or ns.CountIds(p.k)) .. " recipes") or "recipes not seen yet" }
+            end
+        end
         FillCrafters(d, rows, key, ("Nobody in the guild has shared %s yet. Press Update on the Options tab to ask."):format(ns.ProfName(key)), shownChanged)
         return
     end
@@ -1649,7 +1749,9 @@ function LFW:UpdateDetail()
     d.iconBtn.recipeID, d.iconBtn.outItem, d.iconBtn.recipeName = id, e and e.o, name
     d.iconBtn.tex:SetTexture(RecipeIcon(id, e))
     d.name:SetText(name)
-    local crafters = SortRecords(CopyList(self:GetCrafters(key, id)))
+    local guildList, outsideList = self:GetCrafters(key, id)
+    local crafters = SortRecords(CopyList(guildList))
+    local outsiders = SortRecords(CopyList(outsideList))
     local online = 0
     for _, rec in ipairs(crafters) do if self:IsOnline(rec) then online = online + 1 end end
     local catName = (e and e.c) or OTHER
@@ -1718,13 +1820,18 @@ function LFW:UpdateDetail()
     y = self:PlaceCostLines(d, e, y)
 
     -- Who has it
-    PlaceCrafterSection(d, y - 6, ("Crafters (%d)"):format(#crafters), online > 0 and (online .. " online") or "")
+    local hint = online > 0 and (online .. " online") or ""
+    PlaceCrafterSection(d, y - 6, ("Crafters (%d)"):format(#crafters), hint)
     local rows = {}
     for _, rec in ipairs(crafters) do rows[#rows + 1] = { rec = rec } end
-    -- members with the profession who haven't shared their recipe list yet
+    -- members with the profession whose recipes aren't known (yet)
     for _, rec in ipairs(SortRecords(self:GetProfessionMembers(key))) do
         local p = rec.profs[key]
         if p and not p.k then rows[#rows + 1] = { rec = rec, note = "has " .. ns.ProfName(key) .. ", recipes unknown" } end
+    end
+    if #outsiders > 0 then
+        rows[#rows + 1] = { header = ("Outside your guild (%d)"):format(#outsiders) }
+        for _, rec in ipairs(outsiders) do rows[#rows + 1] = { rec = rec } end
     end
     FillCrafters(d, rows, key, "Nobody in the guild has this recipe yet.", shownChanged)
 end
@@ -1750,13 +1857,13 @@ function LFW:CreateOptionsView(f)
 
     ---------------------------------------------------------------- Guild Updates
     AddSection(ov, "Guild Updates", -46, 20, LEFT_RULE)
-    local intro = AddLabel(ov, "Ask guild members who use Looking For Work to send their professions and recipe lists. Only your guild is asked, at most once a minute, and only members whose data changed reply.", nil, C.muted)
+    local intro = AddLabel(ov, "Update asks guild members who use Looking For Work for their data (guild only, once a minute). Members without the addon are read from the game's guild directory automatically: their professions and skill.", nil, C.muted)
     intro:SetPoint("TOPLEFT", 22, -70)
     intro:SetWidth(OPT_LEFT_R - 44)
     if intro.SetSpacing then intro:SetSpacing(2) end
 
     local update = MenuButton(ov, "Update", 130)
-    update:SetPoint("TOPLEFT", 20, -114)
+    update:SetPoint("TOPLEFT", 20, -112)
     update:SetScript("OnClick", function()
         local ok, err = LFW:RequestUpdate()
         if not ok then
@@ -1770,15 +1877,19 @@ function LFW:CreateOptionsView(f)
     ov.update = update
 
     ov.updateStatus = AddLabel(ov, "", "GameFontNormalSmall", C.text)
-    ov.updateStatus:SetPoint("LEFT", update, "RIGHT", 10, 0)
-    ov.updateStatus:SetWidth(OPT_LEFT_R - 20 - 130 - 30)
-    if ov.updateStatus.SetSpacing then ov.updateStatus:SetSpacing(2) end
+    ov.updateStatus:SetPoint("TOPLEFT", 22, -142)
+    ov.updateStatus:SetWidth(OPT_LEFT_R - 44)
+    if ov.updateStatus.SetWordWrap then ov.updateStatus:SetWordWrap(false) end
+    ov.dirStatus = AddLabel(ov, "", "GameFontNormalSmall", C.text)
+    ov.dirStatus:SetPoint("TOPLEFT", 22, -157)
+    ov.dirStatus:SetWidth(OPT_LEFT_R - 44)
+    if ov.dirStatus.SetWordWrap then ov.dirStatus:SetWordWrap(false) end
 
     ---------------------------------------------------------------- Queries
-    AddSection(ov, "Queries", -160, 20, LEFT_RULE)
+    AddSection(ov, "Queries", -178, 20, LEFT_RULE)
     local cb = CreateFrame("CheckButton", nil, ov, "UICheckButtonTemplate")
     cb:SetSize(24, 24)
-    cb:SetPoint("TOPLEFT", 18, -183)
+    cb:SetPoint("TOPLEFT", 18, -201)
     local cbText = AddLabel(cb, "Ignore Queries", "GameFontNormal", C.text)
     cbText:SetPoint("LEFT", cb, "RIGHT", 2, 1)
     cb:SetScript("OnClick", function(self)
@@ -1792,20 +1903,20 @@ function LFW:CreateOptionsView(f)
     end)
     AddHoverTip(cb, "Ignore Queries", "When checked, you don't answer other guild members' Update requests and your professions aren't shared automatically. You still receive what others share.")
     ov.ignoreCheck = cb
-    local cbDesc = AddLabel(ov, "When checked, you won't answer guild members' Update requests and your professions won't be shared automatically. You can still press Update to receive other members' data.", nil, C.muted)
-    cbDesc:SetPoint("TOPLEFT", 46, -210)
+    local cbDesc = AddLabel(ov, "When checked, you won't answer guild members' Update requests, and neither your professions nor the data you collect are shared automatically. You still receive what others share.", nil, C.muted)
+    cbDesc:SetPoint("TOPLEFT", 46, -228)
     cbDesc:SetWidth(OPT_LEFT_R - 66)
     if cbDesc.SetSpacing then cbDesc:SetSpacing(2) end
 
     ---------------------------------------------------------------- Your Characters
-    AddSection(ov, "Your Characters", -262, 20, LEFT_RULE)
+    AddSection(ov, "Your Characters", -280, 20, LEFT_RULE)
     local charHint = AddLabel(ov, "Open each profession window once on every character so its recipes are saved. New recipes you learn are added automatically.", nil, C.muted)
-    charHint:SetPoint("TOPLEFT", 22, -286)
+    charHint:SetPoint("TOPLEFT", 22, -304)
     charHint:SetWidth(OPT_LEFT_R - 44)
     if charHint.SetSpacing then charHint:SetSpacing(2) end
 
     local cscroll, cchild = MakeScroll("LookingForWorkCharScroll", ov, OPT_LEFT_R - 20 - 24 - 20)
-    cscroll:SetPoint("TOPLEFT", 20, -322)
+    cscroll:SetPoint("TOPLEFT", 20, -340)
     cscroll:SetPoint("BOTTOMRIGHT", ov, "BOTTOMLEFT", OPT_LEFT_R - 24, 56)
     ov.charScroll, ov.charChild, ov.charRows = cscroll, cchild, {}
 
@@ -1853,10 +1964,14 @@ function LFW:CreateOptionsView(f)
         b:SetScript("OnClick", function(self) LFW:SelectTab(self.key) end)
         ov.catLabels[p.key] = b
     end
-    local catHint = AddLabel(ov, "Recipe lists come from anyone who opens a profession window, so they also include recipes nobody knows yet.", nil, C.muted)
-    catHint:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -556)
-    catHint:SetWidth(W - 20 - OPT_RIGHT_X - 2)
-    if catHint.SetSpacing then catHint:SetSpacing(2) end
+    ov.outsideStatus = AddLabel(ov, "", "GameFontNormalSmall", C.text)
+    ov.outsideStatus:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -560)
+    ov.outsideStatus:SetWidth(W - 20 - OPT_RIGHT_X - 70)
+    if ov.outsideStatus.SetSpacing then ov.outsideStatus:SetSpacing(2) end
+    local forgetOutside = FlatButton(ov, "Forget", 58, 18)
+    forgetOutside:SetPoint("TOPRIGHT", -20, -558)
+    forgetOutside:SetScript("OnClick", function() StaticPopup_Show("LOOKINGFORWORK_FORGET_OUTSIDE") end)
+    AddHoverTip(forgetOutside, "Forget crafters outside the guild", "Delete everything collected about people outside your guild (from profession links, yours and your guild mates'). Press Update to receive your guild mates' collections again.")
 end
 
 local function GetCharRow(ov, i)
@@ -1933,6 +2048,14 @@ function LFW:UpdateOptionsButtons()
     else
         ov.update:Enable()
         ov.update:SetText("Update")
+    end
+    -- guild directory
+    if not self:CanReadDirectory() then
+        ov.dirStatus:SetText(GREY .. "Guild directory: not available.|r")
+    else
+        local n, readAt = self:DirectoryStatus()
+        ov.dirStatus:SetText(readAt and ("Guild directory: professions of %d members, read %s."):format(n, ns.FormatAgo(readAt))
+            or (GREY .. "Guild directory: read shortly after login and when you open this window.|r"))
     end
     -- status line under the button
     local replies, asked = self:QueryReplies()
@@ -2028,6 +2151,14 @@ function LFW:RefreshOptions()
         ov.memberEmpty:Hide()
     end
 
+    -- crafters outside the guild (collected)
+    local outsideTotal, outsideMine, outsideHidden = self:OutsideCounts()
+    local ctx = self:MyContext()
+    ov.outsideStatus:SetText(("%sOutside your guild:|r %d crafters from profession links (%d found by you)%s"):format(
+        Hex(C.outside), outsideTotal, outsideMine,
+        outsideHidden > 0 and (GREY .. ("  •  %d on other rulesets or factions hidden (you: %s %s)"):format(
+            outsideHidden, ctx.fa or "?", ctx.rs or "?") .. "|r") or ""))
+
     -- Recipe list sizes
     for key, b in pairs(ov.catLabels) do
         b.icon:SetTexture(ns.ProfIcon(key))
@@ -2037,6 +2168,17 @@ function LFW:RefreshOptions()
         SetColor(b.count, C.legend)
     end
 end
+
+StaticPopupDialogs["LOOKINGFORWORK_FORGET_OUTSIDE"] = {
+    text = "Forget everything collected about people outside your guild?\n\nGuild members, your characters and the recipe lists are kept.",
+    button1 = YES or "Yes",
+    button2 = NO or "No",
+    OnAccept = function()
+        LFW:ForgetOutsideData()
+        print(LFW.PREFIX .. "Data about people outside your guild forgotten.")
+    end,
+    timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
+}
 
 StaticPopupDialogs["LOOKINGFORWORK_FORGET"] = {
     text = "Forget everything saved about other guild members?\n\nYour own characters and the recipe lists are kept.",
@@ -2136,6 +2278,7 @@ function LFW:PrintHelp()
     print("  |cffffd100/lfw update|r  ask your guild for their professions")
     print("  |cffffd100/lfw ignore|r  turn Ignore Queries on/off")
     print("  |cffffd100/lfw minimap|r  show / hide the minimap button")
+    print("  |cffffd100/lfw forget outside|r  forget crafters collected from outside your guild")
     print("  |cffffd100/lfw options|r  open the Options tab")
 end
 
@@ -2160,6 +2303,9 @@ SlashCmdList["LOOKINGFORWORK"] = function(msg)
         LFW.db.settings.ignoreQueries = not LFW.db.settings.ignoreQueries
         print(LFW.PREFIX .. "Ignore Queries is now " .. (LFW.db.settings.ignoreQueries and "|cffff6040on|r." or "|cff40ff40off|r."))
         LFW:RequestUIRefresh()
+    elseif cmd == "forget" and rest:lower() == "outside" then
+        LFW:ForgetOutsideData()
+        print(LFW.PREFIX .. "Data about people outside your guild forgotten.")
     elseif cmd == "options" or cmd == "config" then
         LFW:Open("options")
     elseif cmd == "find" or cmd == "search" then

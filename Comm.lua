@@ -21,6 +21,13 @@
 --                 the game itself through C_EncodingUtil). Only sent when every
 --                 request that triggered the list said it can read it (z = 1),
 --                 so older versions keep getting plain C messages.
+--   X  collected  profession data I collected about people OUTSIDE the guild
+--                 (from profession links). Each entry says who it's about
+--                 (name, realm, guild), how and when it was obtained and who
+--                 collected it. Sent as "everything after collection number N":
+--                 Q carries the number I have from each collector. Receivers
+--                 keep an entry only if it's newer than what they have, so old
+--                 data never replaces new data. Always compressed.
 --   R  request    "please send your Tailoring recipe list" to one member. Sent
 --                 automatically when their data arrives (D carries the size of
 --                 the sender's recipe lists) and my list for that profession is
@@ -55,6 +62,9 @@ local MAX_MSG_BYTES           = 250000
 local COMPRESSED_MARK         = "Z:"   -- compressed messages start with this (AceSerializer output starts with "^1")
 local MAX_COMPRESSED_BYTES    = 49152  -- a 600-recipe list is about 12 KB compressed
 local MAX_DECOMPRESSED_BYTES  = 524288
+local SEEN_PER_MSG            = 20     -- collected people per X message
+local SEEN_REPLY_MIN          = 2
+local SEEN_REPLY_MAX          = 7
 local REQUEST_DELAY_MIN       = 2      -- wait before asking for a recipe list...
 local REQUEST_DELAY_MAX       = 6      -- ...so someone else's ask can cover it
 local REQUEST_RETRY           = 600    -- ask for the same recipe list at most every 10 min
@@ -106,7 +116,11 @@ function LFW:SendGuild(msg, prio, queueKey, compress)
             data = COMPRESSED_MARK .. encoded
         end
     end
-    self:SendCommMessage(COMM_PREFIX, data, "GUILD", nil, prio or "NORMAL")
+    -- Everything goes out at one priority. AceComm puts long messages back
+    -- together per sender, and ChatThrottleLib can interleave the pieces of
+    -- messages sent at different priorities, which would garble both. One
+    -- priority keeps every piece in order.
+    self:SendCommMessage(COMM_PREFIX, data, "GUILD", nil, "NORMAL")
     return true
 end
 
@@ -255,7 +269,12 @@ function LFW:RequestUpdate()
     for guid, rec in pairs(self.db.players) do
         if not rec.mine and rec.guild == self.guildKey then have[ns.ShortId(guid)] = rec.rev or 0 end
     end
-    self:SendGuild({ t = "Q", h = have, c = self:CatalogCounts(), z = self:CanCompress() and 1 or nil }, "NORMAL", "Q")
+    local x, nx = {}, 0              -- collected data I already have, per collector
+    for obs, rev in pairs(self.db.sync.collectSeen) do
+        if nx < 100 then x[obs], nx = rev, nx + 1 end
+    end
+    self:SendGuild({ t = "Q", h = have, c = self:CatalogCounts(), z = self:CanCompress() and 1 or nil, x = x },
+        "NORMAL", "Q")
     self.db.sync.lastQuery = time()
     self.queryState = { time = time(), replies = {} }
     self:RequestRoster()
@@ -498,6 +517,12 @@ function LFW:HandleQuery(msg)
         end)
     end
 
+    -- my collected data the asker doesn't have yet (only versions that ask for it)
+    if type(msg.x) == "table" then
+        local have = tonumber(msg.x[self.db.sync.observer]) or 0
+        if (self.db.sync.collectRev or 0) > have then self:ScheduleSeenSend(have) end
+    end
+
     local theirs = type(msg.c) == "table" and msg.c or {}
     for _, p in ipairs(ns.PROFESSIONS) do
         local mine, their = self:CatalogScore(p.key), tonumber(theirs[p.key]) or 0
@@ -608,6 +633,158 @@ function LFW:HandleCatalog(msg, sender, compressed)
     self:DataChanged(false)      -- new recipes, categories, icons or reagents
 end
 
+-------------------------------------------------------------------------------
+-- Collected data about people outside the guild
+-------------------------------------------------------------------------------
+local function PackSeen(rec, since, me)
+    local p, any = {}, false
+    for key, d in pairs(rec.profs) do
+        if d.obs == me and d.cr and d.cr > since then
+            p[key] = { l = d.lvl, m = d.max, k = d.k, pa = d.partial and 1 or nil, t = d.t, s = d.src,
+                       b = d.by, lk = d.link, la = d.linkedAt, ch = d.ch }
+            any = true
+        end
+    end
+    if not any then return nil end
+    return { id = rec.guid, n = rec.name, rl = rec.realm, c = rec.class, g = rec.gname, gn = rec.gnone and 1 or nil,
+             rs = rec.rs, fa = rec.fa, p = p }
+end
+
+-- Send my own observations of people outside the guild made after number `since`
+function LFW:SendSeen(since)
+    if self.db.settings.ignoreQueries or not self.guildKey then return 0 end
+    since = tonumber(since) or 0
+    local me, entries = self.db.sync.observer, {}
+    for guid, rec in pairs(self.db.seen) do
+        -- only people my guild mates can deal with: same ruleset and faction as
+        -- the character I'm on (which is in their guild)
+        if not self:InMyGuild(guid) and not self.db.players[guid] and self:ContextMatches(rec) then
+            local e = PackSeen(rec, since, me)
+            if e then entries[#entries + 1] = e end
+        end
+    end
+    local rev = self.db.sync.collectRev or 0
+    if #entries == 0 then
+        -- nothing (left) to send, but let others know they're up to date
+        self:SendGuild({ t = "X", o = me, s = since, r = rev, e = {} }, "NORMAL", "X0", true)
+        return 0
+    end
+    for i = 1, #entries, SEEN_PER_MSG do
+        local slice = {}
+        for j = i, math.min(i + SEEN_PER_MSG - 1, #entries) do slice[#slice + 1] = entries[j] end
+        local last = i + SEEN_PER_MSG > #entries
+        -- only the last message moves the receiver's "I have up to N" forward
+        self:SendGuild({ t = "X", o = me, s = since, r = last and rev or nil, e = slice }, "BULK", "X" .. i, true)
+    end
+    if since <= (self.db.sync.collectSent or 0) then self.db.sync.collectSent = rev end
+    self:Debug(("Shared %d collected people (after #%d)."):format(#entries, since))
+    return #entries
+end
+
+-- Someone asked: answer after a short random wait (several askers -> one answer)
+function LFW:ScheduleSeenSend(since)
+    local p = self.pendingSeen
+    if p then
+        if since < p.since then p.since = since end
+        return
+    end
+    p = { since = since }
+    self.pendingSeen = p
+    local delay = SEEN_REPLY_MIN + math.random() * (SEEN_REPLY_MAX - SEEN_REPLY_MIN)
+    C_Timer.After(delay, function()
+        self.pendingSeen = nil
+        self:SendSeen(p.since)
+    end)
+end
+
+-- New observations of my own: share them a minute later, at most every 5 minutes
+function LFW:ScheduleSeenShare(delay)
+    if self.seenShareTimer or not self.commReady then return end
+    self.seenShareTimer = C_Timer.NewTimer(delay or AUTO_SHARE_DELAY, function()
+        self.seenShareTimer = nil
+        if self.db.settings.ignoreQueries or not self.guildKey then return end
+        local since = time() - (self.db.sync.lastSeenShare or 0)
+        if since < AUTO_SHARE_MIN_INTERVAL then
+            self:ScheduleSeenShare(AUTO_SHARE_MIN_INTERVAL - since + 1)
+            return
+        end
+        if (self.db.sync.collectRev or 0) > (self.db.sync.collectSent or 0) then
+            self:SendSeen(self.db.sync.collectSent or 0)
+            self.db.sync.lastSeenShare = time()
+        end
+    end)
+end
+
+local VALID_SOURCES = { link = true, member = true, directory = true, chat = true }
+
+function LFW:HandleSeen(msg)
+    local obs = msg.o
+    if type(obs) ~= "string" or #obs > 16 or not obs:match("^%x+$") or obs == self.db.sync.observer then return end
+    if type(msg.e) ~= "table" or not self.guildKey then return end
+    local now, changed = time(), false
+    for i, e in ipairs(msg.e) do
+        if i > SEEN_PER_MSG * 2 then break end
+        local guid = type(e) == "table" and e.id
+        local mine = guid and (guid == UnitGUID("player") or (self.db.players[guid] and self.db.players[guid].mine))
+        -- only people outside my guild: guild members come from their own addon
+        -- or the guild directory
+        if ns.ValidGuid(guid) and not mine and not self:InMyGuild(guid) and type(e.p) == "table" then
+            local rec = self.db.seen[guid]
+            local accepted = false
+            for key, d in pairs(e.p) do
+                if ns.PROF_BY_KEY[key] and type(d) == "table" then
+                    local t = ClampNum(d.t, 0, now) or 0          -- a future date can't block updates
+                    local cur = rec and rec.profs[key]
+                    if not cur or t > (cur.t or 0) then           -- only newer data replaces what I have
+                        local entry = {
+                            lvl = ClampNum(d.l, 0, 1000), max = ClampNum(d.m, 0, 1000), t = t,
+                            src = VALID_SOURCES[d.s] and d.s or "link", by = CleanText(d.b), obs = obs,
+                            ch = CleanText(d.ch, 30), partial = d.pa == 1 or nil,
+                        }
+                        local ok = true
+                        if d.k ~= nil then
+                            local set = ns.DecodeIds(d.k)
+                            if set then entry.k, entry.n = ns.EncodeIds(set), ns.CountKeys(set) else ok = false end
+                        end
+                        local _, _, _, link = ns.ParseTradeLink(d.lk)
+                        if link and link:find(guid, 1, true) then entry.link, entry.linkedAt = link, ClampNum(d.la, 0, now) end
+                        if cur and cur.link and (cur.linkedAt or 0) > (entry.linkedAt or 0) then
+                            entry.link, entry.linkedAt, entry.ch = cur.link, cur.linkedAt, cur.ch   -- keep a newer link
+                        end
+                        if ok then
+                            rec = rec or self:GetSeen(guid, true)
+                            rec.profs[key] = entry
+                            accepted, changed = true, true
+                        end
+                    end
+                end
+            end
+            if accepted then
+                local class = type(e.c) == "string" and e.c:match("^%u+$") and #e.c < 20 and e.c or nil
+                self:SetSeenIdentity(rec, CleanText(e.n), CleanText(e.rl, 40), class)
+                if e.g then rec.gname, rec.gnone = CleanText(e.g, 60), nil
+                elseif e.gn == 1 then rec.gname, rec.gnone = nil, true end
+                -- ruleset and faction: as sent, otherwise mine (a guild mate on
+                -- my ruleset and faction only sends people who match theirs)
+                local ctx = self:MyContext()
+                rec.rs = ns.RULESETS[e.rs] and e.rs or rec.rs or ctx.rs
+                rec.fa = ns.FACTIONS[e.fa] and e.fa or rec.fa or ctx.fa
+                for _, p in pairs(rec.profs) do rec.updated = math.max(rec.updated or 0, p.t or 0) end
+            end
+        end
+    end
+    -- "I now have this collector's data up to number r" (only without gaps)
+    local r = ClampNum(msg.r, 0, 2 ^ 30)
+    if r then
+        local have = self.db.sync.collectSeen[obs] or 0
+        if (ClampNum(msg.s, 0, 2 ^ 30) or 0) <= have and r > have then self.db.sync.collectSeen[obs] = r end
+    end
+    if changed then
+        self:DataChanged(false)
+        if self.PruneOutside then self:PruneOutside() end
+    end
+end
+
 function LFW:OnCommReceived(prefix, data, distribution, sender)
     if prefix ~= COMM_PREFIX or distribution ~= "GUILD" or not self.db then return end
     if type(data) ~= "string" or #data > MAX_MSG_BYTES then return end
@@ -621,7 +798,7 @@ function LFW:OnCommReceived(prefix, data, distribution, sender)
     end
     local ok, msg = Serializer:Deserialize(data)
     if not ok or type(msg) ~= "table" then return end
-    if compressed and msg.t ~= "C" then return end      -- only recipe lists are ever compressed
+    if compressed and msg.t ~= "C" and msg.t ~= "X" then return end   -- only these are ever compressed
     if msg.v ~= PROTOCOL then
         if tonumber(msg.v) and msg.v > PROTOCOL and not self.warnedProtocol then
             self.warnedProtocol = true
@@ -635,6 +812,7 @@ function LFW:OnCommReceived(prefix, data, distribution, sender)
         or (msg.t == "D" and self.HandleData)
         or (msg.t == "C" and self.HandleCatalog)
         or (msg.t == "R" and self.HandleRequest)
+        or (msg.t == "X" and self.HandleSeen)
         or nil
     if msg.t == "I" then
         if ns.PROF_BY_KEY[msg.p] then
