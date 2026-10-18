@@ -743,7 +743,7 @@ function LFW:SelectTab(key)
     else
         f.optionsView:Hide()
         f.profView:Show()
-        f.legend:SetText("Click a recipe to see reagents and crafters" .. DOT .. "Click a crafter to whisper" .. DOT .. "Shift-click to link")
+        f.legend:SetText("Click a recipe to see reagents and crafters" .. DOT .. "Click a crafter to whisper, right-click to open" .. DOT .. "Shift-click to link")
         if f.search:GetText() ~= "" then f.search:SetText("") end   -- also refreshes
         self:RefreshProfession()
         f.listScroll:SetVerticalScroll(0)
@@ -1154,6 +1154,15 @@ function LFW:SetAllCollapsed(collapse)
     self:RefreshProfession()
 end
 
+-- Back from a recipe to the full list of crafters for the profession
+function LFW:ShowAllCrafters()
+    local key = self.currentTab
+    if not ns.PROF_BY_KEY[key] then return end
+    self.selected[key] = nil
+    self:RenderList()
+    self:UpdateDetail()
+end
+
 function LFW:SelectRecipe(id)
     local key = self.currentTab
     if self.selected[key] == id then
@@ -1321,6 +1330,20 @@ function LFW:CreateDetail(d)
     d.name:SetPoint("TOPLEFT", ib, "TOPRIGHT", 12, -3)
     d.name:SetWidth(DW - 16 - 44 - 12 - 16)
     if d.name.SetWordWrap then d.name:SetWordWrap(false) end
+
+    -- "List All Enchanters": back from a recipe to everyone with the profession
+    local all = FlatButton(d, "List All Crafters", 140, 20)
+    all:SetPoint("TOPRIGHT", -16, -16)
+    all:SetScript("OnClick", function() LFW:ShowAllCrafters() end)
+    all:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(self.label:GetText(), 1, 0.82, 0)
+        GameTooltip:AddLine("Show everyone with " .. ns.ProfName(LFW.currentTab) .. ": guild members and crafters outside the guild.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    all:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    all:Hide()
+    d.allBtn = all
 
     d.sub = AddLabel(d, "", "GameFontNormalSmall", C.muted)
     d.sub:SetPoint("TOPLEFT", d.name, "BOTTOMLEFT", 0, -6)
@@ -1718,6 +1741,8 @@ function LFW:UpdateDetail()
     local y
     if not id then
         -------------------------------------------------- profession overview
+        d.allBtn:Hide()
+        d.name:SetWidth(DW - 16 - 44 - 12 - 16)
         d.iconBtn.recipeID, d.iconBtn.outItem = nil, nil
         d.iconBtn.tex:SetTexture(ns.ProfIcon(key))
         d.name:SetText(ns.ProfName(key))
@@ -1746,6 +1771,12 @@ function LFW:UpdateDetail()
     end
 
     -------------------------------------------------- one recipe
+    local prof = ns.PROF_BY_KEY[key]
+    local label = "List All " .. ((prof.crafters and not prof.display) and prof.crafters or "Crafters")
+    d.allBtn.label:SetText(label)
+    d.allBtn:SetWidth(math.ceil(d.allBtn.label:GetStringWidth()) + 24)
+    d.allBtn:Show()
+    d.name:SetWidth(DW - 16 - 44 - 12 - 16 - d.allBtn:GetWidth() - 8)
     local name = RecipeName(id, e)
     d.iconBtn.recipeID, d.iconBtn.outItem, d.iconBtn.recipeName = id, e and e.o, name
     d.iconBtn.tex:SetTexture(RecipeIcon(id, e))

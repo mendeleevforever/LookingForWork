@@ -154,7 +154,7 @@ Looking For Work also appears in the game's **Options → AddOns** list and in t
   - Hover a recipe while searching to see why it matched, e.g. *Found by search — Tooltip: Permanently enchant bracers to increase Defense by 1.*
   - Typing a guild mate's name shows everything they can make.
 - **Filter**: show or hide recipes nobody has, show only recipes with an online crafter, expand or collapse all categories.
-- Click a selected recipe again to go back to the profession overview, which lists every guild member with that profession, their skill and how many recipes they have shared.
+- **List All Enchanters** (List All Tailors, List All Miners...) at the top right of a recipe goes back to the profession overview: every guild member with that profession, their skill and how many recipes they have, plus the crafters outside your guild. Clicking the selected recipe again does the same.
 - Click a crafter to whisper them; right-click to open their profession from their saved link. Shift-click a recipe, its icon or a reagent to link it in chat.
 - Members who have a profession but haven't shared their recipes yet are listed under a recipe as "has Enchanting, recipes unknown".
 
@@ -188,6 +188,9 @@ LookingForWorkDB = {
 ```
 
 ## Changes
+
+**1.4.2**
+- New **List All Crafters** button on a recipe (List All Enchanters, List All Tailors, ...): goes back to the full list of everyone with the profession.
 
 **1.4.1**
 - Opening the profession of a crafter outside your guild now updates their guild: read directly if they're near you, otherwise with a `/who` for their exact name (the game only lets addons use `/who` right after a click, such as opening a link; it only finds people who are online). The `/who` runs quietly: the Who list (in the Group Finder window on WoW Forever) doesn't open and nothing is printed in chat, and it's skipped while the Group Finder window is open or you're in combat. The date it was checked is shown in their tooltip, and a changed guild is shared with guild mates.

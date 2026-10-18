@@ -2,7 +2,7 @@
 ## Title: Looking For Work
 ## Notes: Saves every profession recipe and finds which guild members (online or offline) can craft it
 ## Author: MendeleevForever
-## Version: 1.4.1
+## Version: 1.4.2
 ## OptionalDeps: Auctionator
 ## SavedVariables: LookingForWorkDB
 ## IconTexture: 1505929

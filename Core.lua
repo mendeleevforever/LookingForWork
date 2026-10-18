@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.4.1"
+LFW.VERSION = "1.4.2"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -27,18 +27,18 @@ local T = C_TradeSkillUI
 -- gathering professions included, has a crafting window)
 -------------------------------------------------------------------------------
 local PROFESSIONS = {
-    { key = "alchemy",        name = "Alchemy",        skillLine = 171, primary = true, icon = "Interface\\Icons\\Trade_Alchemy",       short = "Alc" },
-    { key = "blacksmithing",  name = "Blacksmithing",  skillLine = 164, primary = true, icon = "Interface\\Icons\\Trade_BlackSmithing",  short = "BS" },
-    { key = "enchanting",     name = "Enchanting",     skillLine = 333, primary = true, icon = "Interface\\Icons\\Trade_Engraving",      short = "Enc" },
-    { key = "engineering",    name = "Engineering",    skillLine = 202, primary = true, icon = "Interface\\Icons\\Trade_Engineering",    short = "Eng" },
-    { key = "herbalism",      name = "Herbalism",      skillLine = 182, primary = true, icon = "Interface\\Icons\\Trade_Herbalism",      short = "Herb" },
-    { key = "leatherworking", name = "Leatherworking", skillLine = 165, primary = true, icon = "Interface\\Icons\\Trade_LeatherWorking", short = "LW" },
-    { key = "mining",         name = "Mining",         skillLine = 186, primary = true, icon = "Interface\\Icons\\Trade_Mining",         short = "Min" },
-    { key = "skinning",       name = "Skinning",       skillLine = 393, primary = true, icon = "Interface\\Icons\\INV_Misc_Pelt_Wolf_01", short = "Skin" },
-    { key = "tailoring",      name = "Tailoring",      skillLine = 197, primary = true, icon = "Interface\\Icons\\Trade_Tailoring",      short = "Tail" },
-    { key = "cooking",        name = "Cooking",        skillLine = 185, icon = "Interface\\Icons\\INV_Misc_Food_15",          short = "Cook" },
-    { key = "firstaid",       name = "First Aid",      skillLine = 129, icon = "Interface\\Icons\\Spell_Holy_SealOfSacrifice", short = "FA" },
-    { key = "fishing",        name = "Fishing",        skillLine = 356, icon = "Interface\\Icons\\Trade_Fishing",             short = "Fish" },
+    { key = "alchemy", crafters = "Alchemists",        name = "Alchemy",        skillLine = 171, primary = true, icon = "Interface\\Icons\\Trade_Alchemy",       short = "Alc" },
+    { key = "blacksmithing", crafters = "Blacksmiths",  name = "Blacksmithing",  skillLine = 164, primary = true, icon = "Interface\\Icons\\Trade_BlackSmithing",  short = "BS" },
+    { key = "enchanting", crafters = "Enchanters",     name = "Enchanting",     skillLine = 333, primary = true, icon = "Interface\\Icons\\Trade_Engraving",      short = "Enc" },
+    { key = "engineering", crafters = "Engineers",    name = "Engineering",    skillLine = 202, primary = true, icon = "Interface\\Icons\\Trade_Engineering",    short = "Eng" },
+    { key = "herbalism", crafters = "Herbalists",      name = "Herbalism",      skillLine = 182, primary = true, icon = "Interface\\Icons\\Trade_Herbalism",      short = "Herb" },
+    { key = "leatherworking", crafters = "Leatherworkers", name = "Leatherworking", skillLine = 165, primary = true, icon = "Interface\\Icons\\Trade_LeatherWorking", short = "LW" },
+    { key = "mining", crafters = "Miners",         name = "Mining",         skillLine = 186, primary = true, icon = "Interface\\Icons\\Trade_Mining",         short = "Min" },
+    { key = "skinning", crafters = "Skinners",       name = "Skinning",       skillLine = 393, primary = true, icon = "Interface\\Icons\\INV_Misc_Pelt_Wolf_01", short = "Skin" },
+    { key = "tailoring", crafters = "Tailors",      name = "Tailoring",      skillLine = 197, primary = true, icon = "Interface\\Icons\\Trade_Tailoring",      short = "Tail" },
+    { key = "cooking", crafters = "Chefs",        name = "Cooking",        skillLine = 185, icon = "Interface\\Icons\\INV_Misc_Food_15",          short = "Cook" },
+    { key = "firstaid", crafters = "Physicians",       name = "First Aid",      skillLine = 129, icon = "Interface\\Icons\\Spell_Holy_SealOfSacrifice", short = "FA" },
+    { key = "fishing", crafters = "Anglers",        name = "Fishing",        skillLine = 356, icon = "Interface\\Icons\\Trade_Fishing",             short = "Fish" },
 }
 ns.PROFESSIONS = PROFESSIONS
 
