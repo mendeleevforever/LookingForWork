@@ -189,6 +189,9 @@ LookingForWorkDB = {
 
 ## Changes
 
+**1.4.3**
+- Added the CurseForge project ID (1747106) to the TOC.
+
 **1.4.2**
 - New **List All Crafters** button on a recipe (List All Enchanters, List All Tailors, ...): goes back to the full list of everyone with the profession.
 
