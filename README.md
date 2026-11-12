@@ -189,6 +189,9 @@ LookingForWorkDB = {
 
 ## Changes
 
+**1.4.4**
+- Fix: searching for a stat could miss foods and potions whose stats are only in their "Use:" line (for example "spirit" missing Goblin Deviled Clams). The game loads that text separately, and it could be missing when the addon first read the tooltip. The "Use:" effect is now read on its own and waited for until it has loaded.
+
 **1.4.3**
 - Added the CurseForge project ID (1747106) to the TOC.
 

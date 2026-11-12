@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.4.3"
+LFW.VERSION = "1.4.4"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -430,6 +430,35 @@ local function SpellReady(id)
     return false
 end
 
+-- The text of an item's "Use:" effect ("...well fed and gain 6 Stamina and
+-- Spirit"). It belongs to a spell the game loads separately from the item, so
+-- an item's tooltip can be read before it's there. It's read on its own here;
+-- returns the text, or nil (and asks the game to load it) when it isn't ready.
+local function Secret(v)
+    return issecretvalue and v ~= nil and issecretvalue(v) or false
+end
+
+local function ItemEffectText(recipeID, itemID)
+    local getSpell = (C_Item and C_Item.GetItemSpell) or GetItemSpell
+    local _, spellID = SafeCall(getSpell, itemID)
+    if not spellID then return "" end                       -- no "Use:" effect
+    local getDesc = (C_Spell and C_Spell.GetSpellDescription) or GetSpellDescription
+    local desc = SafeCall(getDesc, spellID)
+    if type(desc) == "string" and desc ~= "" and not Secret(desc) then return desc end
+    local key = "effect" .. spellID
+    if not tipPending[key] and Spell and Spell.CreateFromSpellID then
+        tipPending[key] = true
+        local ok, spell = pcall(Spell.CreateFromSpellID, Spell, spellID)
+        if ok and spell and spell.ContinueOnSpellLoad then
+            pcall(spell.ContinueOnSpellLoad, spell, function()
+                tipPending[key] = nil
+                TooltipLoaded(recipeID)
+            end)
+        end
+    end
+    return nil
+end
+
 local function ItemReady(recipeID, itemID)
     if ns.ItemName(itemID) then return true end
     if not tipPending[recipeID] then
@@ -461,6 +490,14 @@ local function BuildTooltipLines(id, e, lines)
             local got = C_TooltipInfo and C_TooltipInfo.GetItemByID
                 and AddTooltipDataLines(SafeCall(C_TooltipInfo.GetItemByID, e.o), lines)
             if not got then AddScanTooltipLines("SetItemByID", e.o, lines) end
+            -- its "Use:" effect, which may not have been in the tooltip yet
+            local effect = ItemEffectText(id, e.o)
+            if effect == nil then
+                incomplete = true
+            elseif effect ~= "" then
+                local t = CleanTipText(effect)
+                if t then lines[#lines + 1] = t end
+            end
         else
             incomplete = true
         end
@@ -472,12 +509,13 @@ end
 function ns.GetTooltipSearch(id, e)
     local c = tipCache[id]
     if c and (not c.incomplete or GetTime() - c.built < 3) then return c end
-    c = { lines = {}, lower = {}, built = GetTime() }
+    local tries = c and c.incomplete and (c.tries or 0) + 1 or 0
+    c = { lines = {}, lower = {}, built = GetTime(), tries = tries }
     local ok, incomplete = pcall(BuildTooltipLines, id, e, c.lines)
-    c.incomplete = not ok or incomplete
+    c.incomplete = (not ok or incomplete) and tries < 5      -- give up after a few tries
     for i, line in ipairs(c.lines) do
         local low = line:lower()
-        if low:find(RETRIEVING, 1, true) then c.incomplete = true end
+        if low:find(RETRIEVING, 1, true) and tries < 5 then c.incomplete = true end
         c.lower[i] = low
     end
     tipCache[id] = c
