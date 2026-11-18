@@ -538,7 +538,14 @@ function LFW:BuildEntries(key, searchText)
     local entries = {}
     for _, cname in ipairs(catList) do
         local list = groups[cname]
-        local isCollapsed = collapsed[cname] and search == ""
+        -- while searching, categories use their own collapse state (all open
+        -- when the search starts, so no match is hidden) instead of your saved one
+        local isCollapsed
+        if search ~= "" then
+            isCollapsed = (self.searchCollapsed and self.searchCollapsed[cname]) and true or false
+        else
+            isCollapsed = collapsed[cname] and true or false
+        end
         entries[#entries + 1] = { header = true, cat = cname, n = #list, collapsed = isCollapsed }
         if not isCollapsed then
             table.sort(list, function(a, b) return a.name < b.name end)
@@ -1083,6 +1090,8 @@ function LFW:RefreshProfession(fromSearch)
     if not f or not ns.PROF_BY_KEY[key] then return end
     self:WarmTooltipCache(key)
 
+    -- a new search (or a different one) starts with every category open
+    if fromSearch then self.searchCollapsed = {} end
     local entries, total, known = self:BuildEntries(key, f.search:GetText())
     self.entries = entries
     f.listChild:SetHeight(math.max(10, #entries * ROW_H))
@@ -1131,8 +1140,19 @@ function LFW:RefreshProfession(fromSearch)
     self:UpdateDetail()
 end
 
+local function Searching(f)
+    return f and f.search and ns.Trim(f.search:GetText()) ~= ""
+end
+
 function LFW:ToggleCategory(cname)
     local key = self.currentTab
+    if Searching(self.frame) then
+        -- collapse within this search only; your saved categories stay as they are
+        self.searchCollapsed = self.searchCollapsed or {}
+        self.searchCollapsed[cname] = not self.searchCollapsed[cname] or nil
+        self:RefreshProfession()
+        return
+    end
     self.db.collapsed[key] = self.db.collapsed[key] or {}
     local c = self.db.collapsed[key]
     c[cname] = not c[cname] or nil
@@ -1142,6 +1162,16 @@ end
 function LFW:SetAllCollapsed(collapse)
     local key = self.currentTab
     if not ns.PROF_BY_KEY[key] then return end
+    if Searching(self.frame) then
+        self.searchCollapsed = {}
+        if collapse then
+            for _, e in ipairs(self.entries or {}) do
+                if e.header then self.searchCollapsed[e.cat] = true end
+            end
+        end
+        self:RefreshProfession()
+        return
+    end
     self.db.collapsed[key] = {}
     if collapse then
         local cat = self.db.catalog[key]
