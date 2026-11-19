@@ -441,6 +441,8 @@ local function EntryString(id, e, catIndex)
         e.qmax or "",
         type(e.i) == "number" and e.i > 0 and ns.ToB36(e.i) or "",
         e.full and "1" or "0",      -- "0": only a name (recipe learned, window not opened yet)
+        e.ri and ns.ToB36(e.ri) or "",            -- the item that teaches it
+        type(e.rs) == "number" and e.rs or "",    -- skill to learn it
     }
     return table.concat(fields, ";")
 end
@@ -612,6 +614,11 @@ function LFW:HandleCatalog(msg, sender, compressed)
                     local icon = tonumber(f[9] or "", 36)
                     if icon and icon > 0 and icon < 2147483647 then e.i = icon end
                 end
+                if not e.ri then
+                    local ri = tonumber(f[11] or "", 36)
+                    if ri and ri > 0 and ri < 2147483647 then e.ri = ri end
+                end
+                if e.rs == nil then e.rs = ClampNum(f[12], 1, 1000) end
                 -- Does the sender's entry have real details? (older versions
                 -- don't say; then it does if it has a category, reagents or an item)
                 local detailed

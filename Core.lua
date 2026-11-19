@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.4.5"
+LFW.VERSION = "1.5.0"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -591,6 +591,11 @@ local function PriceDB()
     return priceDB
 end
 
+-- Auctionator's saved price table ({ ["itemID"] = { m = price } }), if found
+function ns.AuctionatorPriceTable()
+    return PriceDB()
+end
+
 function ns.ResetPriceCache()
     priceDB, priceDBTime = nil, 0
 end
@@ -758,7 +763,9 @@ LookingForWorkDB = {
     settings  = { ignoreQueries = false, showUnowned = true, onlineOnly = false },
     catalog   = { [profKey] = { rev, scanned, cats = { [categoryName] = order },
                                 recipes = { [recipeID] = { n = name, c = category, i = icon,
-                                            r = { {itemID, qty}, ... }, o = outputItemID,
+                                            r = { {itemID, qty}, ... }, o = outputItemID, oq = its quality,
+                                            ri = recipe item that teaches it, rs = skill to learn it,
+                                            st = where it's learned (the game's text),
                                             q = "Anvil", d = description, full = true } } } },
     players   = { [guid] = { guid, name, class, guild, rev, updated, mine,
                              profs = { [profKey] = { lvl, max, scanned,
@@ -786,6 +793,10 @@ local DEFAULT_SETTINGS = {
     showUnowned   = true,    -- list recipes nobody in the guild has
     onlineOnly    = false,   -- list only recipes with an online crafter
     showOutside   = true,    -- include crafters outside the guild (collected data)
+    showKnown     = true,    -- recipes the character I'm on knows
+    showUnknown   = true,    -- ...and doesn't know
+    sortBy        = "name",  -- name, skill, price (to buy the recipe), craft (cost to craft), rarity
+    groupByCategory = true,
     debug         = false,
 }
 
@@ -797,6 +808,11 @@ function LFW:InitDB()
     for k, v in pairs(DEFAULT_SETTINGS) do
         if db.settings[k] == nil then db.settings[k] = v end
     end
+    -- rarity filter: [0] Poor .. [5] Legendary, none = recipes that make no item
+    db.settings.rarity = tbl(db.settings.rarity)
+    for q = 0, 5 do if db.settings.rarity[q] == nil then db.settings.rarity[q] = true end end
+    if db.settings.rarity.none == nil then db.settings.rarity.none = true end
+    db.recipeVendors = tbl(db.recipeVendors)   -- [recipe item ID] = { c = copper, x = {currencies}, v = vendor, z = zone, t }
     db.positions  = tbl(db.positions)
     db.minimap    = tbl(db.minimap)        -- minimap button: { minimapPos = angle, hide = bool }
     db.collapsed  = tbl(db.collapsed)
@@ -1298,6 +1314,11 @@ function LFW:ScanOpenTradeSkill()
                     entry.c = cname
                 end
             end
+            -- where it's learned ("Trainer", "Vendor: ... Cost: ..."), once per recipe
+            if entry.st == nil and T.GetRecipeSourceText then
+                local st = SafeCall(T.GetRecipeSourceText, id)
+                entry.st = (type(st) == "string" and st ~= "" and not (issecretvalue and issecretvalue(st))) and st:sub(1, 400) or false
+            end
             -- Reagents etc. are read once per recipe (the list update event fires often)
             -- (entry.full == 1 means the details came from a guild member; read our own)
             if entry.full ~= true and budget < 2000 then
@@ -1596,6 +1617,7 @@ function handlers.PLAYER_LOGIN()
     local ok, err = pcall(function()
         if LFW.InitComm then LFW:InitComm() end
         if LFW.InitCollect then LFW:InitCollect() end
+        if LFW.InitRecipes then LFW:InitRecipes() end
         if LFW.InitUI then LFW:InitUI() end
     end)
     if not ok then print(LFW.PREFIX .. "|cffff4040load error:|r " .. tostring(err)) end

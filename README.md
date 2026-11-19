@@ -12,6 +12,8 @@ Looking For Work keeps a list of every recipe in every profession, including the
 - **Search by name or by effect.** Search `intellect`, `defense` or `fire resistance` to find recipes by what they do, or type a guild mate's name to see everything they can make.
 - **Crafters outside your guild.** People who link their profession in Trade or other chat channels are remembered too.
 - **Crafting cost and profit.** With Auctionator installed, see what a recipe costs to make and what you'd earn selling it.
+- **What a recipe costs to buy.** See a recipe's auction house price and vendor price (including other currencies like badges and marks), and the skill needed to learn it.
+- **Filter and sort.** Show recipes you know or don't know, filter by the rarity of what they make, and sort by skill to learn, recipe price, cost to craft or rarity.
 - **Minimap button** and a `/lfw` command to open it anywhere.
 
 ## Installation
@@ -45,6 +47,8 @@ Then restart the game or type `/reload`. Everything it needs is included.
 
 **Recipe details (right):**
 - What the recipe makes, any tools it needs, and its reagents (with how many you're carrying).
+- **Recipe:** the item that teaches it (for example *Pattern: Linen Cloak*), with its auction house price and vendor price, including other currencies, and the vendor's name and zone. For recipes not sold as an item, where it's learned (for example "Trainer").
+- **Skill to learn**, when it's known.
 - **To Craft** and **Profit**, if Auctionator is installed.
 - **Crafters:** guild members who can make it, online first, then members who have the profession but haven't shared their recipes, then crafters outside your guild.
 - **List All Enchanters** (List All Tailors, List All Chefs...) at the top right takes you back to everyone with that profession.
@@ -69,9 +73,13 @@ Hover a recipe while searching to see why it matched. Categories open up when yo
 To search every profession at once, type `/lfw find <text>`.
 
 **Filter** lets you:
+- show or hide recipes you know and recipes you don't know (on the character you're playing)
 - hide recipes nobody has
 - show only recipes with a crafter who's online now
 - include or hide crafters outside your guild
+- show or hide each rarity of the item a recipe makes: Common, Uncommon, Rare, Epic, Legendary, Poor, or recipes that make no item (most enchants)
+- **sort** by name, skill to learn, recipe price, cost to craft or rarity. The value it's sorted by is shown on each row, and recipes without a value are listed last
+- turn **Group by category** off to sort the whole profession as one list
 - open or fold every category
 
 If the list is empty, it tells you which filter or search is hiding the recipes.
@@ -110,6 +118,15 @@ With Auctionator installed, each recipe shows:
 - **Profit:** what the item sells for on the auction house, minus the auction house's 5% cut and the cost of the reagents. It's shown in red if you'd lose money.
 
 Hover either line for a breakdown. Recipes that don't make an item (most enchants) show **To Craft** only. Prices appear after Auctionator has scanned the auction house and refresh each time you close it.
+
+## Recipe prices and skill
+
+Looking For Work learns which item teaches each recipe as you play:
+- from Auctionator's auction house scans
+- when you open a vendor that sells recipes (this also saves the exact cost, including currencies like badges or marks)
+- when you see a recipe item's tooltip, in your bags, the auction house or a link
+
+**Recipe price** uses the auction house price first, then the vendor price. **Skill to learn** comes from the recipe item ("Requires Tailoring (75)"). Recipes that are only taught by trainers have no recipe item, so they show where they're learned instead and are listed last when sorting by skill or price.
 
 ## Options tab
 
@@ -153,6 +170,9 @@ They have the profession but don't use the addon. Ask them to link their profess
 **I don't see someone I saw in Trade chat.**
 They may play on a different ruleset or faction than your current character, or they linked a profession that isn't one of the twelve. Crafters outside your guild only appear once they've linked their profession.
 
+**A recipe has no price or skill to learn.**
+Looking For Work hasn't seen the item that teaches it yet. Scan the auction house with Auctionator, visit a vendor that sells it, or hover the recipe item. Recipes taught only by trainers don't have one.
+
 **Update says to wait.**
 Update can be used once a minute.
 
@@ -160,6 +180,11 @@ Update can be used once a minute.
 No. Everything is shared over your guild's addon channel only.
 
 ## Changes
+
+**1.5.0**
+- New filters: recipes you know and don't know, and the rarity of the item a recipe makes.
+- New sorting: by skill to learn, recipe price, cost to craft and rarity, with or without categories.
+- The recipe panel shows what the recipe costs to buy at the auction house and from vendors (including other currencies), where it's learned, and the skill needed.
 
 **1.4.5**
 - Categories can now be folded while searching.

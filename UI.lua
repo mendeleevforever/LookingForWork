@@ -492,6 +492,25 @@ function LFW:RecipesByCrafterName(key, search)
     return out
 end
 
+-- The value a recipe is sorted by, and how it's shown on its row
+function LFW:SortValue(sortBy, key, e, quality)
+    if sortBy == "skill" then
+        local skill = ns.RecipeSkill and ns.RecipeSkill(e, key)
+        return skill, skill and tostring(skill) or nil
+    elseif sortBy == "price" then
+        local price = ns.RecipePrice and ns.RecipePrice(e)
+        return price, price and ns.Coins(price) or nil
+    elseif sortBy == "craft" then
+        local info = e and e.r and ns.AuctionatorLoaded() and ns.CraftEconomics(e)
+        if info and #info.parts > 0 and #info.missing == 0 then return info.cost, ns.Coins(info.cost) end
+        return nil
+    elseif sortBy == "rarity" then
+        if type(quality) == "number" then return quality, nil end
+        return nil
+    end
+    return nil
+end
+
 -- Flat list of headers + recipes for the virtual list, plus totals for the header bar
 function LFW:BuildEntries(key, searchText)
     local cat = self.db.catalog[key]
@@ -504,6 +523,15 @@ function LFW:BuildEntries(key, searchText)
     for id in pairs(counts.n) do ids[id] = true end
     for id in pairs(counts.x) do ids[id] = true end
     local byCrafter = search ~= "" and self:RecipesByCrafterName(key, search) or {}
+    -- recipes the character I'm on knows
+    local me = self.db.players[UnitGUID("player") or ""]
+    local mine = me and me.profs[key] and me.profs[key].k
+    local myKnown = mine and ns.DecodeIds(mine) or {}
+    local rarity = s.rarity or {}
+    local sortBy = s.sortBy or "name"
+    -- item rarity is only looked up when it's filtered or sorted by
+    local needQuality = sortBy == "rarity"
+    for _, on in pairs(rarity) do if on == false then needQuality = true end end
 
     local groups, total, known = {}, 0, 0
     for id in pairs(ids) do
@@ -515,13 +543,28 @@ function LFW:BuildEntries(key, searchText)
         local pass = true
         if not s.showUnowned and count == 0 and outside == 0 then pass = false end
         if s.onlineOnly and online == 0 then pass = false end
+        local iKnow = myKnown[id] and true or false
+        if iKnow and s.showKnown == false then pass = false end
+        if not iKnow and s.showUnknown == false then pass = false end
+        local quality
+        if needQuality and ns.RecipeQuality then quality = ns.RecipeQuality(e) end
+        if pass then
+            if quality == false then
+                if rarity.none == false then pass = false end
+            elseif quality ~= nil and rarity[quality] == false then
+                pass = false            -- (an item that hasn't loaded yet is shown until it has)
+            end
+        end
         local why
         if pass and search ~= "" then pass, why = MatchSearch(search, id, name, e, byCrafter[id]) end
         if pass then
-            local cname = (e and e.c) or OTHER
+            local cname = s.groupByCategory == false and "" or ((e and e.c) or OTHER)
             local g = groups[cname]
             if not g then g = {}; groups[cname] = g end
-            g[#g + 1] = { id = id, name = name, count = count, online = online, outside = outside, match = why }
+            local r = { id = id, name = name, count = count, online = online, outside = outside, match = why,
+                        quality = quality, iKnow = iKnow }
+            r.sortValue, r.sortText = self:SortValue(sortBy, key, e, quality)
+            g[#g + 1] = r
         end
     end
 
@@ -534,8 +577,28 @@ function LFW:BuildEntries(key, searchText)
         return a < b
     end)
 
+    -- order within a category (or the whole list): by name, or by the chosen
+    -- value with unknown values last
+    local descending = sortBy == "rarity"
+    local function before(a, b)
+        if sortBy ~= "name" and a.sortValue ~= b.sortValue then
+            if a.sortValue == nil then return false end
+            if b.sortValue == nil then return true end
+            if descending then return a.sortValue > b.sortValue end
+            return a.sortValue < b.sortValue
+        end
+        return a.name < b.name
+    end
+
     local collapsed = self.db.collapsed[key] or {}
     local entries = {}
+    if s.groupByCategory == false then
+        -- one list, no categories
+        local list = groups[""] or {}
+        table.sort(list, before)
+        for _, r in ipairs(list) do entries[#entries + 1] = r end
+        return entries, total, known
+    end
     for _, cname in ipairs(catList) do
         local list = groups[cname]
         -- while searching, categories use their own collapse state (all open
@@ -548,7 +611,7 @@ function LFW:BuildEntries(key, searchText)
         end
         entries[#entries + 1] = { header = true, cat = cname, n = #list, collapsed = isCollapsed }
         if not isCollapsed then
-            table.sort(list, function(a, b) return a.name < b.name end)
+            table.sort(list, before)
             for _, r in ipairs(list) do entries[#entries + 1] = r end
         end
     end
@@ -909,9 +972,14 @@ local function GetListRow(f, i)
     row.dot = row:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     row.dot:SetPoint("LEFT", 10, 0)
     row.dot:SetText("•")
+    -- the value the list is sorted by (skill, price...), left of the crafter count
+    row.sortv = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.sortv:SetPoint("RIGHT", -34, 0)
+    row.sortv:SetJustifyH("RIGHT")
+    SetColor(row.sortv, C.legend)
     row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     row.text:SetPoint("LEFT", 24, 0)
-    row.text:SetPoint("RIGHT", -30, 0)
+    row.text:SetPoint("RIGHT", row.sortv, "LEFT", -6, 0)
     row.text:SetJustifyH("LEFT")
     if row.text.SetWordWrap then row.text:SetWordWrap(false) end
     row.count = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -985,6 +1053,7 @@ local function FillRow(row, e, selectedId)
     row.hcount:SetShown(isHeader)
     row.text:SetShown(not isHeader)
     row.count:SetShown(not isHeader)
+    row.sortv:SetShown(not isHeader)
     if isHeader then
         row.dot:Hide()
         row.sel:Hide()
@@ -1015,6 +1084,12 @@ local function FillRow(row, e, selectedId)
         SetColor(row.text, selected and { 0.85, 0.85, 0.85 } or C.none)
         row.dot:Hide()
         row.count:SetText("")
+    end
+    row.sortv:SetText(e.sortText or "")
+    -- sorted by rarity: names in their item's quality colour
+    if LFW.db.settings.sortBy == "rarity" and type(e.quality) == "number" then
+        local c = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
+        if c and c.r then row.text:SetTextColor(c.r, c.g, c.b) end
     end
 end
 
@@ -1127,7 +1202,12 @@ function LFW:RefreshProfession(fromSearch)
             local why = {}
             if ns.Trim(f.search:GetText()) ~= "" then why[#why + 1] = "your search" end
             if self.db.settings.onlineOnly then why[#why + 1] = "\"Only recipes with an online crafter\"" end
-            if not self.db.settings.showUnowned then why[#why + 1] = "\"Show recipes nobody has\" being off" end
+            if not self.db.settings.showUnowned then why[#why + 1] = "\"Recipes nobody has\" being off" end
+            if self.db.settings.showKnown == false then why[#why + 1] = "\"Recipes I know\" being off" end
+            if self.db.settings.showUnknown == false then why[#why + 1] = "\"Recipes I don't know\" being off" end
+            for q, on in pairs(self.db.settings.rarity or {}) do
+                if on == false then why[#why + 1] = "the rarity filter"; break end
+            end
             f.listEmpty:SetText("No recipes match " .. (#why > 0 and table.concat(why, " and ") or "your search or filter") .. "."
                 .. (self.db.settings.onlineOnly and "\n\nCrafters outside the guild never count as online. Change this under Filter." or ""))
         end
@@ -1217,13 +1297,50 @@ end
 -------------------------------------------------------------------------------
 -- Filter menu
 -------------------------------------------------------------------------------
-local FILTER_ITEMS = {
-    { text = "Show recipes nobody has", setting = "showUnowned" },
-    { text = "Only recipes with an online crafter", setting = "onlineOnly" },
-    { text = "Include crafters outside the guild", setting = "showOutside" },
-    { separator = true },
-    { text = "Expand all categories", action = function() LFW:SetAllCollapsed(false) end },
-    { text = "Collapse all categories", action = function() LFW:SetAllCollapsed(true) end },
+local function QualityLabel(q, name)
+    local c = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+    return (c and c.hex or "|cffffffff") .. name .. "|r"
+end
+
+-- Two columns. Item kinds: header, setting (checkbox), rarity (checkbox in
+-- settings.rarity), sort (one of several), action, separator
+local FILTER_COLUMNS = {
+    {
+        { header = "Show" },
+        { text = "Recipes I know", setting = "showKnown" },
+        { text = "Recipes I don't know", setting = "showUnknown" },
+        { text = "Recipes nobody has", setting = "showUnowned" },
+        { text = "Only with an online crafter", setting = "onlineOnly" },
+        { text = "Crafters outside the guild", setting = "showOutside" },
+        { header = "Rarity of the item made" },
+        { text = QualityLabel(1, "Common"), rarity = 1 },
+        { text = QualityLabel(2, "Uncommon"), rarity = 2 },
+        { text = QualityLabel(3, "Rare"), rarity = 3 },
+        { text = QualityLabel(4, "Epic"), rarity = 4 },
+        { text = QualityLabel(5, "Legendary"), rarity = 5 },
+        { text = QualityLabel(0, "Poor"), rarity = 0 },
+        { text = "Makes no item", rarity = "none" },
+    },
+    {
+        { header = "Sort by" },
+        { text = "Name", sort = "name" },
+        { text = "Skill to learn", sort = "skill" },
+        { text = "Recipe price", sort = "price" },
+        { text = "Cost to craft", sort = "craft" },
+        { text = "Rarity", sort = "rarity" },
+        { text = "Group by category", setting = "groupByCategory" },
+        { separator = true },
+        { text = "Expand all categories", action = function() LFW:SetAllCollapsed(false) end },
+        { text = "Collapse all categories", action = function() LFW:SetAllCollapsed(true) end },
+    },
+}
+local FILTER_TIPS = {
+    showKnown = "Recipes the character you're playing knows.",
+    showUnknown = "Recipes the character you're playing doesn't know.",
+    skill = "The skill needed to learn the recipe, from its recipe item. Recipes only taught by trainers come last.",
+    price = "What the recipe costs to buy: its auction house price, otherwise its vendor price. Unknown prices come last.",
+    craft = "What the reagents cost (Auctionator). Recipes with unpriced reagents come last.",
+    rarity = "The rarity of the item the recipe makes, best first.",
 }
 
 function LFW:CreateDropList()
@@ -1251,52 +1368,69 @@ function LFW:CreateDropList()
     tinsert(UISpecialFrames, "LookingForWorkFilterMenu")
 
     l.items = {}
-    local y, w = -6, 250
-    for i, item in ipairs(FILTER_ITEMS) do
-        if item.separator then
-            local sep = l:CreateTexture(nil, "ARTWORK")
-            sep:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.55)
-            sep:SetHeight(1)
-            sep:SetPoint("TOPLEFT", 8, y - 4)
-            sep:SetPoint("TOPRIGHT", -8, y - 4)
-            y = y - 9
-        else
-            local b = CreateFrame("Button", nil, l)
-            b:SetSize(w - 8, 20)
-            b:SetPoint("TOPLEFT", 4, y)
-            local hl = b:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetAllPoints()
-            hl:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.22)
-            b.check = b:CreateTexture(nil, "OVERLAY")
-            b.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
-            b.check:SetSize(16, 16)
-            b.check:SetPoint("LEFT", 4, 0)
-            b.box = b:CreateTexture(nil, "ARTWORK")
-            b.box:SetSize(12, 12)
-            b.box:SetPoint("CENTER", b.check, "CENTER", 0, 0)
-            b.box:SetColorTexture(C.field[1], C.field[2], C.field[3], 1)
-            b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            b.text:SetPoint("LEFT", 24, 0)
-            b.text:SetText(item.text)
-            SetColor(b.text, C.text)
-            b.item = item
-            b:SetScript("OnClick", function(self)
-                local it = self.item
-                if it.setting then
-                    LFW.db.settings[it.setting] = not LFW.db.settings[it.setting]
-                    LFW:InvalidateIndex()
+    local colW, tallest = 210, 0
+    for col, items in ipairs(FILTER_COLUMNS) do
+        local x, y = 4 + (col - 1) * colW, -6
+        for _, item in ipairs(items) do
+            if item.separator then
+                local sep = l:CreateTexture(nil, "ARTWORK")
+                sep:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.55)
+                sep:SetHeight(1)
+                sep:SetPoint("TOPLEFT", x + 4, y - 4)
+                sep:SetWidth(colW - 16)
+                y = y - 9
+            elseif item.header then
+                local h = l:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                h:SetPoint("TOPLEFT", x + 4, y - 5)
+                SetColor(h, C.header)
+                h:SetText(item.header)
+                y = y - 20
+            else
+                local b = CreateFrame("Button", nil, l)
+                b:SetSize(colW - 8, 20)
+                b:SetPoint("TOPLEFT", x, y)
+                local hl = b:CreateTexture(nil, "HIGHLIGHT")
+                hl:SetAllPoints()
+                hl:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.22)
+                b.check = b:CreateTexture(nil, "OVERLAY")
+                b.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+                b.check:SetSize(16, 16)
+                b.check:SetPoint("LEFT", 4, 0)
+                b.box = b:CreateTexture(nil, "ARTWORK")
+                b.box:SetSize(12, 12)
+                b.box:SetPoint("CENTER", b.check, "CENTER", 0, 0)
+                b.box:SetColorTexture(C.field[1], C.field[2], C.field[3], 1)
+                b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                b.text:SetPoint("LEFT", 24, 0)
+                b.text:SetText(item.text)
+                SetColor(b.text, C.text)
+                b.item = item
+                b:SetScript("OnClick", function(self)
+                    local it, st = self.item, LFW.db.settings
+                    if it.setting then
+                        st[it.setting] = not st[it.setting]
+                        LFW:InvalidateIndex()
+                    elseif it.rarity ~= nil then
+                        st.rarity[it.rarity] = not st.rarity[it.rarity]
+                    elseif it.sort then
+                        st.sortBy = it.sort
+                    else
+                        l:Hide()
+                        it.action()
+                        return
+                    end
                     LFW:UpdateDropList()
                     LFW:RefreshProfession()
-                else
-                    l:Hide()
-                    it.action()
-                end
-            end)
-            l.items[#l.items + 1] = b
-            y = y - 20
+                end)
+                local tip = FILTER_TIPS[item.setting or item.sort or ""]
+                if tip then AddHoverTip(b, item.text, tip) end
+                l.items[#l.items + 1] = b
+                y = y - 20
+            end
         end
+        if -y > tallest then tallest = -y end
     end
-    l:SetSize(w, -y + 6)
+    l:SetSize(colW * #FILTER_COLUMNS + 8, tallest + 6)
     self.dropList = l
     return l
 end
@@ -1304,14 +1438,19 @@ end
 function LFW:UpdateDropList()
     local l = self.dropList
     if not l then return end
+    local st = self.db.settings
     for _, b in ipairs(l.items) do
         local it = b.item
-        if it.setting then
-            b.box:Show()
-            b.check:SetShown(self.db.settings[it.setting] and true or false)
-        else
+        local on
+        if it.setting then on = st[it.setting] and true or false
+        elseif it.rarity ~= nil then on = st.rarity[it.rarity] ~= false
+        elseif it.sort then on = (st.sortBy or "name") == it.sort end
+        if on == nil then
             b.box:Hide()
             b.check:Hide()
+        else
+            b.box:Show()
+            b.check:SetShown(on)
         end
     end
 end
@@ -1387,6 +1526,9 @@ function LFW:CreateDetail(d)
     d.creates:SetWidth(DW - 32)
     d.requires = AddLabel(d, "", "GameFontHighlight", C.text)
     d.requires:SetWidth(DW - 32)
+    d.learn = AddLabel(d, "", "GameFontHighlight", C.text)
+    d.learn:SetWidth(DW - 32)
+    if d.learn.SetSpacing then d.learn:SetSpacing(2) end
 
     d.reagHeader = AddLabel(d, "Reagents:", "GameFontNormal", C.header)
     d.reagNote = AddLabel(d, "", "GameFontNormalSmall", C.muted)
@@ -1745,6 +1887,47 @@ function LFW:ShowCostTooltip(owner)
     GameTooltip:Show()
 end
 
+-- Buying and learning a recipe: the recipe item with its auction and vendor
+-- prices (vendor prices can include other currencies), where it's learned,
+-- and the skill needed
+function LFW:LearnText(e, key)
+    if not e then return nil end
+    local lines = {}
+    local refresh = function() LFW:RequestUIRefresh(true) end
+    if e.ri then
+        local iname = ns.ItemName(e.ri)
+        if not iname then ns.LoadItem(e.ri, refresh) end
+        local label = iname and (ns.ItemQualityHex(e.ri) .. "[" .. iname .. "]|r") or (GREY .. "loading...|r")
+        local parts = {}
+        local ah = ns.AuctionPrice(e.ri)
+        if ah then parts[#parts + 1] = "Auction house " .. ns.Coins(ah) end
+        local v = ns.RecipeVendorCost(e)
+        if v then
+            local where = v.v and (GREY .. "  (" .. v.v .. (v.z and (", " .. v.z) or "") .. ")|r") or ""
+            parts[#parts + 1] = "Vendor " .. ns.FormatVendorCost(v) .. where
+        else
+            local vp = ns.VendorPrice(e.ri)
+            if vp then parts[#parts + 1] = "Vendor " .. ns.Coins(vp) end
+        end
+        lines[#lines + 1] = Hex(C.header) .. "Recipe:|r " .. label
+        if #parts > 0 then
+            for _, p in ipairs(parts) do lines[#lines + 1] = "    " .. p end
+        elseif not ns.AuctionatorLoaded() then
+            lines[#lines + 1] = GREY .. "    no price seen yet (visit a vendor that sells it, or install Auctionator)|r"
+        else
+            lines[#lines + 1] = GREY .. "    no price seen yet|r"
+        end
+    end
+    if type(e.st) == "string" and not (e.ri and ns.RecipeVendorCost(e)) then
+        local st = e.st:gsub("|n", "  •  "):gsub("[\r\n]+", "  •  ")
+        lines[#lines + 1] = Hex(C.header) .. "Learned from:|r " .. st
+    end
+    local skill = ns.RecipeSkill(e, key)
+    if skill then lines[#lines + 1] = Hex(C.header) .. "Skill to learn:|r " .. skill end
+    if #lines == 0 then return nil end
+    return table.concat(lines, "\n")
+end
+
 function LFW:UpdateDetail()
     local f = self.frame
     if not f or not f.profView:IsShown() then return end
@@ -1782,6 +1965,7 @@ function LFW:UpdateDetail()
         y = PlaceText(d, d.desc, "Select a recipe on the left to see its reagents and who in the guild can craft it.", y, 4)
         y = PlaceText(d, d.creates, nil, y)
         y = PlaceText(d, d.requires, nil, y)
+        y = PlaceText(d, d.learn, nil, y)
         PlaceCrafterSection(d, y - 10, "Guild Members with " .. ns.ProfName(key), "skill")
         local rows = {}
         for _, rec in ipairs(members) do
@@ -1838,6 +2022,7 @@ function LFW:UpdateDetail()
     end
     y = PlaceText(d, d.creates, creates, y, 4)
     y = PlaceText(d, d.requires, (e and e.q) and (Hex(C.header) .. "Requires:|r " .. e.q) or nil, y, 4)
+    y = PlaceText(d, d.learn, self:LearnText(e, key), y, 4)
 
     -- Reagents
     y = y - 6
