@@ -507,6 +507,21 @@ function LFW:SortValue(sortBy, key, e, quality)
     elseif sortBy == "rarity" then
         if type(quality) == "number" then return quality, nil end
         return nil
+    elseif sortBy == "deprofit" or sortBy == "vendorprofit" then
+        if not ns.DE then return nil end
+        -- items that can't be disenchanted (or recipes that make no item): N/A,
+        -- listed after every item that can
+        if sortBy == "deprofit" and e and (e.full or e.o) and ns.DE.CanDisenchant(e.o) == false then
+            return nil, GREY .. "N/A|r"
+        end
+        -- crafting it to disenchant it, or to sell it to a vendor
+        local info = e and e.r and e.o and ns.AuctionatorLoaded() and ns.CraftEconomics(e)
+        if not info or #info.parts == 0 or #info.missing > 0 then return nil end
+        ns.DE.CraftProfits(info)
+        local profit
+        if sortBy == "deprofit" then profit = info.deProfit else profit = info.vendorProfit end
+        if profit then return profit, ns.Coins(profit) end
+        return nil
     end
     return nil
 end
@@ -579,7 +594,8 @@ function LFW:BuildEntries(key, searchText)
 
     -- order within a category (or the whole list): by name, or by the chosen
     -- value with unknown values last
-    local descending = sortBy == "rarity"
+    -- best first: rarity, and the two profits (most profit at the top, losses at the bottom)
+    local descending = sortBy == "rarity" or sortBy == "deprofit" or sortBy == "vendorprofit"
     local function before(a, b)
         if sortBy ~= "name" and a.sortValue ~= b.sortValue then
             if a.sortValue == nil then return false end
@@ -1328,6 +1344,8 @@ local FILTER_COLUMNS = {
         { text = "Recipe price", sort = "price" },
         { text = "Cost to craft", sort = "craft" },
         { text = "Rarity", sort = "rarity" },
+        { text = "Disenchant profit", sort = "deprofit" },
+        { text = "Vendor profit", sort = "vendorprofit" },
         { text = "Group by category", setting = "groupByCategory" },
         { separator = true },
         { text = "Expand all categories", action = function() LFW:SetAllCollapsed(false) end },
@@ -1341,6 +1359,8 @@ local FILTER_TIPS = {
     price = "What the recipe costs to buy: its auction house price, otherwise its vendor price. Unknown prices come last.",
     craft = "What the reagents cost (Auctionator). Recipes with unpriced reagents come last.",
     rarity = "The rarity of the item the recipe makes, best first.",
+    deprofit = "The average value of disenchanting what the recipe makes (materials at auction prices, after the 5% cut), minus the cost of crafting it. Most profit first, losses at the bottom.",
+    vendorprofit = "What a vendor pays for what the recipe makes, minus the cost of crafting it. Most profit first, losses at the bottom.",
 }
 
 function LFW:CreateDropList()
@@ -1838,6 +1858,28 @@ function LFW:PlaceCostLines(d, e, y)
         end
     end
 
+    -- crafting it to disenchant it, or to sell it to a vendor
+    local info = d.costHover.info
+    if info and info.outItem and ns.DE then
+        ns.DE.CraftProfits(info)
+        local extra = {}
+        local function money(v) return v < 0 and ("|cffff4040" .. ns.Coins(v) .. "|r") or ns.Coins(v) end
+        if ns.DE.CanDisenchant(info.outItem) == false then
+            extra[#extra + 1] = GOLD_LABEL .. "Disenchant profit:|r " .. GREY .. "N/A (can't be disenchanted)|r"
+        elseif info.deProfit then
+            extra[#extra + 1] = GOLD_LABEL .. "Disenchant profit:|r " .. money(info.deProfit)
+                .. ((info.deMissing or info.deEstimated) and (GREY .. "  (estimate)|r") or "")
+        elseif info.deValue then
+            extra[#extra + 1] = GOLD_LABEL .. "Disenchant value:|r " .. ns.Coins(info.deValue)
+        end
+        if info.vendorProfit then
+            extra[#extra + 1] = GOLD_LABEL .. "Vendor profit:|r " .. money(info.vendorProfit)
+        end
+        if #extra > 0 then
+            profitText = (profitText and (profitText .. "\n") or "") .. table.concat(extra, "\n")
+        end
+    end
+
     local top = y - 2
     y = PlaceText(d, d.costLine, costText, top, 3)
     y = PlaceText(d, d.profitLine, profitText, y, 3)
@@ -1878,6 +1920,29 @@ function LFW:ShowCostTooltip(owner)
             GameTooltip:AddDoubleLine("Profit", ns.Coins(info.profit), 1, 0.82, 0, 1, 1, 1)
         else
             GameTooltip:AddLine("No Auctionator price for " .. name .. ".", C.muted[1], C.muted[2], C.muted[3], true)
+        end
+    end
+    if info.deOutcomes then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Disenchanting it" .. (info.deEstimated and " (estimated yields)" or ""), 1, 0.82, 0)
+        for _, o in ipairs(info.deOutcomes) do
+            local qty = o.minQty == o.maxQty and tostring(o.minQty) or (o.minQty .. "-" .. o.maxQty)
+            local left = ("%s%%  %sx %s"):format(o.chance % 1 == 0 and tostring(o.chance) or ("%.1f"):format(o.chance), qty, ns.DE.MaterialName(o.itemID))
+            GameTooltip:AddDoubleLine(left, o.value and ns.Coins(o.value) or (GREY .. "no price|r"), 1, 1, 1, 1, 1, 1)
+        end
+        GameTooltip:AddDoubleLine("Average value", ns.Coins(info.deValue), 1, 0.82, 0, 1, 1, 1)
+        if info.deProfit then
+            local qty = info.outQty or 1
+            GameTooltip:AddDoubleLine("After the 5% auction house cut", ns.Coins(info.deValue * qty * ns.AH_CUT), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+            GameTooltip:AddDoubleLine("Disenchant profit", ns.Coins(info.deProfit), 1, 0.82, 0, 1, 1, 1)
+        end
+    end
+    if info.sell then
+        GameTooltip:AddLine(" ")
+        local qty = info.outQty or 1
+        GameTooltip:AddDoubleLine("A vendor pays", ns.Coins(info.sell * qty), 1, 0.82, 0, 1, 1, 1)
+        if info.vendorProfit then
+            GameTooltip:AddDoubleLine("Vendor profit", ns.Coins(info.vendorProfit), 1, 0.82, 0, 1, 1, 1)
         end
     end
     local age = AgeText(info.oldest)

@@ -2,7 +2,7 @@
 ## Title: Looking For Work
 ## Notes: Saves every profession recipe and finds which guild members (online or offline) can craft it
 ## Author: MendeleevForever
-## Version: 1.5.1
+## Version: 1.6.1
 ## X-Curse-Project-ID: 1747106
 ## OptionalDeps: Auctionator
 ## SavedVariables: LookingForWorkDB
@@ -23,4 +23,5 @@ Core.lua
 Comm.lua
 Collect.lua
 Recipes.lua
+Disenchant.lua
 UI.lua

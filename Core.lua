@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.5.1"
+LFW.VERSION = "1.6.1"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -807,7 +807,7 @@ local DEFAULT_SETTINGS = {
     showOutside   = true,    -- include crafters outside the guild (collected data)
     showKnown     = true,    -- recipes the character I'm on knows
     showUnknown   = true,    -- ...and doesn't know
-    sortBy        = "name",  -- name, skill, price (to buy the recipe), craft (cost to craft), rarity
+    sortBy        = "name",  -- name, skill, price (to buy the recipe), craft (cost to craft), rarity, deprofit, vendorprofit
     groupByCategory = true,
     debug         = false,
 }

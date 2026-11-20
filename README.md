@@ -13,7 +13,7 @@ Looking For Work keeps a list of every recipe in every profession, including the
 - **Crafters outside your guild.** People who link their profession in Trade or other chat channels are remembered too.
 - **Crafting cost and profit.** With Auctionator installed, see what a recipe costs to make and what you'd earn selling it.
 - **What a recipe costs to buy.** See a recipe's auction house price and vendor price (including other currencies like badges and marks), and the skill needed to learn it.
-- **Filter and sort.** Show recipes you know or don't know, filter by the rarity of what they make, and sort by skill to learn, recipe price, cost to craft or rarity.
+- **Filter and sort.** Show recipes you know or don't know, filter by the rarity of what they make, and sort by skill to learn, recipe price, cost to craft, rarity, disenchant profit or vendor profit.
 - **Minimap button** and a `/lfw` command to open it anywhere.
 
 ## Installation
@@ -78,7 +78,7 @@ To search every profession at once, type `/lfw find <text>`.
 - show only recipes with a crafter who's online now
 - include or hide crafters outside your guild
 - show or hide each rarity of the item a recipe makes: Common, Uncommon, Rare, Epic, Legendary, Poor, or recipes that make no item (most enchants)
-- **sort** by name, skill to learn, recipe price, cost to craft or rarity. The value it's sorted by is shown on each row, and recipes without a value are listed last
+- **sort** by name, skill to learn, recipe price, cost to craft, rarity, **disenchant profit** or **vendor profit**. The value it's sorted by is shown on each row, and recipes without a value are listed last. The two profit sorts put the most profit at the top and losses at the bottom
 - turn **Group by category** off to sort the whole profession as one list
 - open or fold every category
 
@@ -117,7 +117,10 @@ With Auctionator installed, each recipe shows:
 - **To Craft:** what the reagents cost, using the cheaper of the vendor price or the latest auction house price for each.
 - **Profit:** what the item sells for on the auction house, minus the auction house's 5% cut and the cost of the reagents. It's shown in red if you'd lose money.
 
-Hover either line for a breakdown. Recipes that don't make an item (most enchants) show **To Craft** only. Prices appear after Auctionator has scanned the auction house and refresh each time you close it.
+- **Disenchant profit:** the average value of the materials you'd get from disenchanting what the recipe makes, at auction house prices after the 5% cut, minus the cost of crafting it. Items that can't be disenchanted show N/A and are listed after the ones that can. "(estimate)" means some material had no price, or the yields for that item level are estimated.
+- **Vendor profit:** what a vendor pays for what the recipe makes, minus the cost of crafting it.
+
+Hover any of these lines for a breakdown, including the chance and value of each disenchanting result. Recipes that don't make an item (most enchants) show **To Craft** only. Prices appear after Auctionator has scanned the auction house and refresh each time you close it.
 
 ## Recipe prices and skill
 
@@ -180,6 +183,13 @@ Update can be used once a minute.
 No. Everything is shared over your guild's addon channel only.
 
 ## Changes
+
+**1.6.1**
+- Fixed: sorting by Disenchant profit showed the vendor profit for items that can't be disenchanted. They now show N/A.
+
+**1.6.0**
+- New sorts: **Disenchant profit** and **Vendor profit**, from most profit to the biggest loss.
+- The recipe panel shows both profits, and the breakdown lists each disenchanting result with its chance and value.
 
 **1.5.1**
 - Fixed: clicking some crafters outside your guild whispered "Name-SomethingRealm" and failed. Whispers now use the name alone.
