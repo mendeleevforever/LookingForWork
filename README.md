@@ -181,6 +181,9 @@ No. Everything is shared over your guild's addon channel only.
 
 ## Changes
 
+**1.5.1**
+- Fixed: clicking some crafters outside your guild whispered "Name-SomethingRealm" and failed. Whispers now use the name alone.
+
 **1.5.0**
 - New filters: recipes you know and don't know, and the rarity of the item a recipe makes.
 - New sorting: by skill to learn, recipe price, cost to craft and rarity, with or without categories.

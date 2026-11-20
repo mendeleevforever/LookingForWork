@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.5.0"
+LFW.VERSION = "1.5.1"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -101,6 +101,15 @@ local function NameKey(name)
 end
 ns.NameKey = NameKey
 
+-- Is this one of WoW Forever's internal server labels ("CAMWOWUS1Realm5PvE")?
+-- Character names can never contain digits, so a "-..." ending with a digit
+-- in it is never part of a name. WoW Forever doesn't use realms the way older
+-- versions did: everyone on a ruleset is reached by name alone.
+local function IsServerLabel(s)
+    return type(s) == "string" and s ~= "" and not s:find(" ", 1, true) and s:find("%d") ~= nil
+end
+ns.IsServerLabel = IsServerLabel
+
 -- Remove a "-Realm" suffix, but only when it really is a realm name, so a
 -- hyphenated last name (e.g. "Anna Smith-Jones") is never cut.
 local function StripRealm(name, server)
@@ -118,6 +127,9 @@ local function StripRealm(name, server)
             end
         end
     end
+    -- any internal server label ("Bugs Frosty-CAMWOWUS1Realm5PvE" -> "Bugs Frosty")
+    local base, label = name:match("^(.-)%-([^%-]+)$")
+    if base and base ~= "" and IsServerLabel(label) then return CleanName(base) end
     return name
 end
 ns.StripRealm = StripRealm
@@ -892,6 +904,17 @@ function LFW:InitDB()
             if next(rec.profs) == nil then db.seen[guid] = nil end
         end
     end
+    -- Repair (1.5.1): WoW Forever's internal server labels were saved as realms
+    -- (and sometimes in names), which made whispers fail
+    for _, list in ipairs({ db.seen, db.players }) do
+        for _, rec in pairs(list) do
+            if type(rec) == "table" then
+                if IsServerLabel(rec.realm) then rec.realm = nil end
+                if type(rec.name) == "string" then rec.name = StripRealm(rec.name) or rec.name end
+            end
+        end
+    end
+
     -- Repair (1.4.1 pre-release): clicking quickly through crafters could save
     -- one person's window under another person's record, renaming it. Names
     -- are unique per realm, so two records with the same name on the same

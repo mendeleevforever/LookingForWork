@@ -1635,10 +1635,10 @@ local function GetCrafterRow(d, i, peek)
             end
             return
         end
+        -- by name alone: WoW Forever reaches everyone on a ruleset by name, and
+        -- an internal server label on the name makes the whisper fail
         local m = LFW:MemberInfo(rec)
-        local target = (m and m.raw) or rec.name
-        if rec.seen and not m and rec.realm then target = rec.name .. "-" .. rec.realm end
-        Whisper(target)
+        Whisper(ns.StripRealm((m and m.raw) or rec.name))
     end)
     row:SetScript("OnEnter", function(self)
         local rec = self.rec
@@ -2268,7 +2268,7 @@ local function GetMemberRow(ov, i, peek)
         local rec = self.rec
         if not rec or LFW:IsMe(rec) then return end
         local m = LFW:MemberInfo(rec)
-        Whisper((m and m.raw) or rec.name)
+        Whisper(ns.StripRealm((m and m.raw) or rec.name))
     end)
     row:SetScript("OnEnter", function(self)
         if not self.rec then return end

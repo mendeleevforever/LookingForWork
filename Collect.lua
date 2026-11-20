@@ -202,7 +202,8 @@ ns.SameName = SameName
 function LFW:SetSeenIdentity(rec, name, realm, class, authoritative)
     name = ns.CleanName(name)
     if name and (authoritative or not rec.name or #name >= #rec.name or not rec.name:find(" ", 1, true)) then rec.name = name end
-    if type(realm) == "string" and realm ~= "" then
+    -- a real realm name only; WoW Forever's internal server labels aren't kept
+    if type(realm) == "string" and realm ~= "" and not ns.IsServerLabel(realm) then
         local mine = GetNormalizedRealmName and GetNormalizedRealmName()
         if realm ~= mine and realm ~= GetRealmName() then rec.realm = realm end
     end
