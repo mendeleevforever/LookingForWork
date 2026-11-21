@@ -17,7 +17,7 @@ local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.6.1"
+LFW.VERSION = "1.6.2"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -991,18 +991,77 @@ end
 -------------------------------------------------------------------------------
 -- Guild
 -------------------------------------------------------------------------------
+-- The ruleset of the realm I'm on: Hardcore, RP, PvP, otherwise PvE (nil when
+-- the game doesn't say yet). WoW Forever has one world per ruleset, and since
+-- its 2026-11-20 hotfix the game no longer tells addons realm names or IDs.
+local ruleset
+function ns.Ruleset()
+    if ruleset then return ruleset end
+    if not (C_GameRules and C_GameRules.IsGameRuleActive and Enum and Enum.GameRule) then return nil end
+    local function on(rule)
+        if rule == nil then return false end
+        local ok, active = pcall(C_GameRules.IsGameRuleActive, rule)
+        return ok and active and true or false
+    end
+    local g = Enum.GameRule
+    if on(g.HardcoreRuleset) then ruleset = "Hardcore"
+    elseif on(g.RPRuleset) then ruleset = "RP"
+    elseif on(g.PvPRuleset) then ruleset = "PvP"
+    else ruleset = "PvE" end
+    return ruleset
+end
+
+-- The ruleset named in a guild key from before 1.6.2 ("CAMWOWUS2Realm5PvE|..."),
+-- or nil when it doesn't say
+local function KeyRuleset(prefix)
+    if type(prefix) ~= "string" then return nil end
+    if prefix:find("Hardcore", 1, true) then return "Hardcore" end
+    if prefix:find("PvP", 1, true) then return "PvP" end
+    if prefix:find("PvE", 1, true) then return "PvE" end
+    if prefix == "RP" or prefix:find("RP$") then return "RP" end
+    return nil
+end
+
+-- Guild data saved under an older key of this guild (built from a realm name
+-- the game no longer gives, or before the ruleset was known) moves to the
+-- current key. Keys from a different ruleset are left alone.
+function LFW:MigrateGuildKeys(key, guildName)
+    local rs = ns.Ruleset()
+    local moved = 0
+    local function convert(old)
+        if type(old) ~= "string" or old == key then return nil end
+        local prefix, name = old:match("^(.-)|(.+)$")
+        if name ~= guildName then return nil end
+        local oldRs = KeyRuleset(prefix)
+        if oldRs and rs and oldRs ~= rs then return nil end
+        moved = moved + 1
+        return key
+    end
+    for _, rec in pairs(self.db.players) do
+        local new = convert(rec.guild)
+        if new then rec.guild = new end
+    end
+    for _, rec in pairs(self.db.seen or {}) do
+        local new = convert(rec.gkey)
+        if new then rec.gkey = new end
+    end
+    if moved > 0 then self:Debug(("Moved %d guild records to %s."):format(moved, key)) end
+end
+
+-- My guild's key: ruleset + guild name ("PvE|Second Wind"). Realm names
+-- aren't used: WoW Forever no longer gives them to addons.
 function LFW:RefreshGuild()
     if not IsInGuild() then
         self.guildKey, self.guildName = nil, nil
         return
     end
-    local name, _, _, realm = GetGuildInfo("player")
-    if name and name ~= "" then
-        realm = (type(realm) == "string" and realm ~= "") and realm or (GetNormalizedRealmName and GetNormalizedRealmName()) or GetRealmName() or ""
-        local key = realm .. "|" .. name
+    local name = GetGuildInfo("player")
+    if type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then
+        local key = (ns.Ruleset() or "?") .. "|" .. name
         if key ~= self.guildKey then
             self.guildKey, self.guildName = key, name
             self.indexDirty = true
+            if self.db then self:MigrateGuildKeys(key, name) end
         end
     end
 end
@@ -1105,6 +1164,18 @@ function LFW:GetMe()
     if not rec then
         rec = { guid = guid, profs = {}, rev = 0, updated = time() }
         self.db.players[guid] = rec
+        -- the same character saved under another ID (if the game ever gives a
+        -- character a new ID): carry its data over instead of keeping two
+        local myName = NameFromUnit("player")
+        if myName then
+            for oldGuid, old in pairs(self.db.players) do
+                if oldGuid ~= guid and old.mine and old.name and NameKey(old.name) == NameKey(myName) then
+                    rec.profs, rec.rev, rec.guild = old.profs, (old.rev or 0) + 1, old.guild
+                    self.db.players[oldGuid] = nil
+                    break
+                end
+            end
+        end
     end
     rec.mine = true
     rec.name = NameFromUnit("player") or rec.name

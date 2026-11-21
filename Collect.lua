@@ -105,7 +105,7 @@ local myContext
 -- { rs = "PvP", fa = "Alliance" } for the character I'm logged in on
 function LFW:MyContext()
     if not myContext or not myContext.rs or not myContext.fa then
-        myContext = { rs = DetectRuleset(), fa = UnitFactionGroup and UnitFactionGroup("player") }
+        myContext = { rs = ns.Ruleset and ns.Ruleset() or DetectRuleset(), fa = UnitFactionGroup and UnitFactionGroup("player") }
         if not FACTIONS[myContext.fa] then myContext.fa = nil end
     end
     return myContext

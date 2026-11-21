@@ -184,6 +184,9 @@ No. Everything is shared over your guild's addon channel only.
 
 ## Changes
 
+**1.6.2**
+- Works with WoW Forever's change that hides realm names from addons: guilds are now told apart by ruleset and guild name, and your saved guild data carries over automatically.
+
 **1.6.1**
 - Fixed: sorting by Disenchant profit showed the vendor profit for items that can't be disenchanted. They now show N/A.
 

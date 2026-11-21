@@ -559,6 +559,15 @@ function LFW:HandleData(msg)
                         profs   = UnpackProfs(c.p),
                     }
                     changed = true
+                    -- the same person saved under another ID (if the game ever
+                    -- gives characters new IDs): keep only the new one
+                    local new = self.db.players[c.id]
+                    for oldGuid, old in pairs(self.db.players) do
+                        if oldGuid ~= c.id and not old.mine and old.guild == self.guildKey and old.name and new.name
+                            and ns.NameKey(old.name) == ns.NameKey(new.name) then
+                            self.db.players[oldGuid] = nil
+                        end
+                    end
                 end
                 if self.db.players[c.id] then received[#received + 1] = self.db.players[c.id] end
                 if self.queryState then self.queryState.replies[c.id] = true end
