@@ -1,3 +1,4 @@
+local addonName, ns = ...
 -- Disenchant.lua
 -- Disenchanting value of the item a recipe makes, for the "Disenchant profit"
 -- sort and line: the average auction value of what disenchanting it gives,
@@ -9,7 +10,6 @@
 -- weapon essence rule. If a patch changes yields, update the tables below
 -- (and DEValueTooltip's) together.
 
-local ADDON_NAME, ns = ...
 local LFW = ns.LFW
 
 local DE = {}
@@ -208,8 +208,8 @@ end
 -- (it's asked for), or isn't covered by the tables
 function DE.Outcomes(itemID)
     if not itemID or DE.EXCLUDED[itemID] then return nil end
-    local instant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
-    local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+    local instant = C_Item and C_Item.GetItemInfoInstant
+    local getInfo = C_Item and C_Item.GetItemInfo
     if not instant or not getInfo then return nil end
     local okI, _, _, _, equipLoc, _, classID, subclassID = pcall(instant, itemID)
     if not okI or (classID ~= CLASS_WEAPON and classID ~= CLASS_ARMOR) then return nil end
@@ -304,8 +304,7 @@ function DE.CraftProfits(info)
             info.deProfit = math.floor(value * qty * ns.AH_CUT - info.cost + 0.5)
         end
     end
-    local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
-    local ok, name, _, _, _, _, _, _, _, _, _, sellPrice = pcall(getInfo, info.outItem)
+    local ok, name, _, _, _, _, _, _, _, _, _, sellPrice = pcall(C_Item and C_Item.GetItemInfo, info.outItem)
     if ok and name and type(sellPrice) == "number" and not Secret(sellPrice) and sellPrice > 0 then
         info.sell = sellPrice
         if #info.missing == 0 then info.vendorProfit = sellPrice * qty - info.cost end

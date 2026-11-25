@@ -1,3 +1,4 @@
+local addonName, ns = ...
 -- Recipes.lua
 -- Buying and learning recipes, and the rarity of what they make:
 --
@@ -14,7 +15,6 @@
 --     (saved when the window is read, see Core.lua).
 --   * The rarity (quality) of the item a recipe makes.
 
-local ADDON_NAME, ns = ...
 local LFW = ns.LFW
 local SafeCall = ns.SafeCall
 
@@ -37,9 +37,8 @@ local function Secret(v)
 end
 
 local function ItemInstant(itemID)
-    local f = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
-    if not f or not itemID then return nil end
-    local ok, _, _, _, _, _, classID, subclassID = pcall(f, itemID)
+    if not itemID or not (C_Item and C_Item.GetItemInfoInstant) then return nil end
+    local ok, _, _, _, _, _, classID, subclassID = pcall(C_Item.GetItemInfoInstant, itemID)
     if ok then return classID, subclassID end
     return nil
 end
@@ -165,7 +164,8 @@ end
 -------------------------------------------------------------------------------
 function LFW:ScanMerchant()
     if not GetMerchantNumItems or not GetMerchantItemLink then return end
-    local vendor = (GetUnitName and GetUnitName("npc", false)) or UnitName("npc")
+    local vendor = GetUnitName and GetUnitName("npc", false)
+    if Secret(vendor) then vendor = nil end
     local zone = GetRealZoneText and GetRealZoneText() or nil
     for i = 1, GetMerchantNumItems() or 0 do
         local link = GetMerchantItemLink(i)
@@ -266,26 +266,23 @@ end
 -------------------------------------------------------------------------------
 -- Setup
 -------------------------------------------------------------------------------
-local frame = CreateFrame("Frame")
-frame:SetScript("OnEvent", function(_, event)
-    if not LFW.db then return end
-    if event == "MERCHANT_SHOW" or event == "MERCHANT_UPDATE" then
-        if LFW.merchantTimer then LFW.merchantTimer:Cancel() end
-        LFW.merchantTimer = C_Timer.NewTimer(0.3, function()
-            LFW.merchantTimer = nil
-            local ok, err = pcall(LFW.ScanMerchant, LFW)
-            if not ok then LFW:Debug("vendor: " .. tostring(err)) end
-        end)
-    elseif event == "AUCTION_HOUSE_CLOSED" then
-        C_Timer.After(2, function() LFW:ScanAuctionatorRecipeItems() end)
-    end
+-- this file's events, in the addon's one event table (Core.lua)
+local function MerchantChanged()
+    if LFW.merchantTimer then LFW.merchantTimer:Cancel() end
+    LFW.merchantTimer = C_Timer.NewTimer(0.3, function()
+        LFW.merchantTimer = nil
+        local ok, err = pcall(LFW.ScanMerchant, LFW)
+        if not ok then LFW:Debug("vendor: " .. tostring(err)) end
+    end)
+end
+ns.On("MERCHANT_SHOW", MerchantChanged)
+ns.On("MERCHANT_UPDATE", MerchantChanged)
+ns.On("AUCTION_HOUSE_CLOSED", function()
+    C_Timer.After(2, function() LFW:ScanAuctionatorRecipeItems() end)
 end)
 
 function LFW:InitRecipes()
     self.db.recipeVendors = type(self.db.recipeVendors) == "table" and self.db.recipeVendors or {}
-    for _, event in ipairs({ "MERCHANT_SHOW", "MERCHANT_UPDATE", "AUCTION_HOUSE_CLOSED" }) do
-        pcall(frame.RegisterEvent, frame, event)
-    end
     -- any recipe item shown in a tooltip
     if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
         pcall(TooltipDataProcessor.AddTooltipPostCall, Enum.TooltipDataType.Item, function(_, data)

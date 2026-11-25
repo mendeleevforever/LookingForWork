@@ -24,7 +24,7 @@ Install it with the CurseForge app, or copy the `LookingForWork` folder into:
 World of Warcraft\_forever_\Interface\AddOns\
 ```
 
-Then restart the game or type `/reload`. Everything it needs is included.
+Then restart the game. If Looking For Work doesn't appear in the AddOns list, close the game completely and start it again. Everything it needs is included.
 
 **Optional:** install [Auctionator](https://www.curseforge.com/wow/addons/auctionator) to see crafting costs and profit.
 
@@ -54,7 +54,7 @@ Then restart the game or type `/reload`. Everything it needs is included.
 - **List All Enchanters** (List All Tailors, List All Chefs...) at the top right takes you back to everyone with that profession.
 
 **In any crafter list:**
-- **Click** a crafter to whisper them.
+- **Click** a crafter to put a whisper link for them in your chat window; click the name there to whisper them.
 - **Right-click** to open their profession, if they've linked it.
 - **Hover** for their professions, skill, and where the information came from.
 
@@ -183,6 +183,10 @@ Update can be used once a minute.
 No. Everything is shared over your guild's addon channel only.
 
 ## Changes
+
+**1.7.0**
+- Updated for WoW Forever's current addon rules. Your saved data carries over.
+- Clicking a crafter now puts a whisper link in your chat window (addons can no longer open the chat box for you).
 
 **1.6.2**
 - Works with WoW Forever's change that hides realm names from addons: guilds are now told apart by ruleset and guild name, and your saved guild data carries over automatically.

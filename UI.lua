@@ -1,3 +1,4 @@
+local addonName, ns = ...
 -- UI.lua
 -- The Looking For Work window, laid out like the WoW Forever profession window:
 --   * a tab for every profession down the right-hand edge, Options tab on top
@@ -8,7 +9,6 @@
 -- Drawn in the same palette as Player Notes (dark window, layered gold trim,
 -- title plate on the top edge).
 
-local ADDON_NAME, ns = ...
 local LFW = ns.LFW
 
 local W, H          = 880, 660
@@ -306,17 +306,21 @@ local function MakeScroll(globalName, parent, childWidth)
     return scroll, child
 end
 
+-- Shift-click linking goes through the game's own HandleModifiedItemClick
 local function InsertChatLink(link)
-    if not link then return false end
-    local fn = (ChatFrameUtil and ChatFrameUtil.InsertLink) or ChatEdit_InsertLink
-    if fn then return pcall(fn, link) end
-    return false
+    if not link or not HandleModifiedItemClick then return false end
+    return HandleModifiedItemClick(link) and true or false
 end
 
+-- Addon code mustn't open the chat box itself, so a click puts a clickable
+-- name in your chat window instead: click it there to whisper them.
 local function Whisper(target)
-    if not target then return end
-    local fn = (ChatFrameUtil and ChatFrameUtil.SendTell) or ChatFrame_SendTell
-    if fn then pcall(fn, target) end
+    if not target or ns.IsSecret(target) then return end
+    local link = "|Hplayer:" .. target .. "|h[" .. target .. "]|h"
+    local frame = DEFAULT_CHAT_FRAME or (ChatFrame1)
+    if frame and frame.AddMessage then
+        frame:AddMessage(LFW.PREFIX .. "click to whisper " .. link)
+    end
 end
 
 -- "3 days", "5 hours", "2 months"
@@ -334,7 +338,8 @@ end
 
 local function GuildDisplayName(guildKey)
     if type(guildKey) ~= "string" then return nil end
-    return guildKey:match("|(.+)$") or guildKey
+    local names = LFW.db and LFW.db.guildNames
+    return (names and names[guildKey]) or guildKey:match("|(.+)$") or "guild"
 end
 
 -------------------------------------------------------------------------------
@@ -425,10 +430,9 @@ local function AttachVirtualList(scroll, child, rowH, getRow, fill)
         scroll.lastOffset = nil
         self:Render()
     end
-    scroll:HookScript("OnUpdate", function(sf)
-        local off = sf:GetVerticalScroll()
-        if off ~= sf.lastOffset then sf.lastOffset = off; list:Render() end
-    end)
+    -- redraw on the scroll frame's own events (no polling)
+    scroll:HookScript("OnVerticalScroll", function() list:Render() end)
+    scroll:HookScript("OnScrollRangeChanged", function() list:Render() end)
     scroll:HookScript("OnSizeChanged", function() list:Render() end)
     return list
 end
@@ -539,7 +543,7 @@ function LFW:BuildEntries(key, searchText)
     for id in pairs(counts.x) do ids[id] = true end
     local byCrafter = search ~= "" and self:RecipesByCrafterName(key, search) or {}
     -- recipes the character I'm on knows
-    local me = self.db.players[UnitGUID("player") or ""]
+    local me = self.db.players[ns.MyGuid() or ""]
     local mine = me and me.profs[key] and me.profs[key].k
     local myKnown = mine and ns.DecodeIds(mine) or {}
     local rarity = s.rarity or {}
@@ -829,7 +833,7 @@ function LFW:SelectTab(key)
     else
         f.optionsView:Hide()
         f.profView:Show()
-        f.legend:SetText("Click a recipe to see reagents and crafters" .. DOT .. "Click a crafter to whisper, right-click to open" .. DOT .. "Shift-click to link")
+        f.legend:SetText("Click a recipe to see reagents and crafters" .. DOT .. "Click a crafter for a whisper link, right-click to open" .. DOT .. "Shift-click to link")
         if f.search:GetText() ~= "" then f.search:SetText("") end   -- also refreshes
         self:RefreshProfession()
         f.listScroll:SetVerticalScroll(0)
@@ -913,13 +917,10 @@ function LFW:CreateProfessionView(f)
     scroll:SetPoint("TOPLEFT", LIST_X, LIST_TOP)
     scroll:SetPoint("BOTTOMRIGHT", pv, "BOTTOMLEFT", LEFT_R - 24, CONTENT_BOT + 4)
     f.listScroll, f.listChild, f.rows = scroll, child, {}
+    -- redraw on the scroll frame's own events (no polling)
     scroll:HookScript("OnVerticalScroll", function() LFW:RenderList() end)
+    scroll:HookScript("OnScrollRangeChanged", function() LFW:RenderList() end)
     scroll:HookScript("OnSizeChanged", function() LFW:RenderList() end)
-    -- Safety net: re-render whenever the scroll position changes for any reason
-    scroll:HookScript("OnUpdate", function(self)
-        local off = self:GetVerticalScroll()
-        if off ~= self.lastOffset then self.lastOffset = off; LFW:RenderList() end
-    end)
 
     f.listEmpty = AddLabel(pv, "", "GameFontNormal", C.muted)
     f.listEmpty:SetPoint("TOPLEFT", LIST_X + 10, LIST_TOP - 30)
@@ -1306,7 +1307,6 @@ function LFW:LinkRecipe(id)
     if C_TradeSkillUI and C_TradeSkillUI.GetRecipeLink then link = ns.SafeCall(C_TradeSkillUI.GetRecipeLink, id) end
     if not link and e and e.o then link = ns.ItemLink(e.o) end
     if not link and C_Spell and C_Spell.GetSpellLink then link = ns.SafeCall(C_Spell.GetSpellLink, id) end
-    if not link and GetSpellLink then link = ns.SafeCall(GetSpellLink, id) end
     InsertChatLink(link)
 end
 
@@ -1666,7 +1666,7 @@ local function GetCrafterRow(d, i, peek)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         LFW:AddMemberTooltip(rec, self.profKey)
         if not LFW:IsMe(rec) then
-            GameTooltip:AddLine("Click to whisper", C.muted[1], C.muted[2], C.muted[3])
+            GameTooltip:AddLine("Click for a whisper link in chat", C.muted[1], C.muted[2], C.muted[3])
             if LFW:CanOpenProfessionOf(rec, self.profKey) then
                 GameTooltip:AddLine("Right-click to open their " .. ns.ProfName(self.profKey), C.muted[1], C.muted[2], C.muted[3])
             end
@@ -1707,7 +1707,6 @@ function LFW:AddMemberTooltip(rec, highlightKey)
         local guildText = rec.gname and ("<" .. rec.gname .. ">") or (rec.gnone and "no guild" or "unknown")
         if rec.gt then guildText = guildText .. GREY .. "  (checked " .. ns.FormatDate(rec.gt) .. ")|r" end
         GameTooltip:AddDoubleLine("Guild", guildText, C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
-        if rec.realm then GameTooltip:AddDoubleLine("Realm", rec.realm, C.muted[1], C.muted[2], C.muted[3], 1, 1, 1) end
         local rs, fa = self:ContextOf(rec)
         if rs or fa then
             GameTooltip:AddDoubleLine("Plays on", (fa or "?") .. "  •  " .. (rs or "?"), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
@@ -2239,7 +2238,7 @@ function LFW:CreateOptionsView(f)
     forget:SetScript("OnClick", function() StaticPopup_Show("LOOKINGFORWORK_FORGET") end)
     AddHoverTip(forget, "Forget guild data", "Delete everything you have saved about other guild members. Your own characters and the recipe lists are kept. Press Update to fetch fresh data.")
 
-    local mHint = AddLabel(ov, "Online members first. Hover a name for professions, click to whisper.", nil, C.muted)
+    local mHint = AddLabel(ov, "Online members first. Hover a name for professions, click for a whisper link.", nil, C.muted)
     mHint:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -70)
     mHint:SetWidth(W - 20 - OPT_RIGHT_X - 2)
 
@@ -2522,16 +2521,16 @@ function LFW:RegisterBlizzardOptions()
     b:SetPoint("TOPLEFT", d, "BOTTOMLEFT", 0, -14)
     b:SetText("Open Looking For Work")
     b:SetScript("OnClick", function()
-        if SettingsPanel and SettingsPanel:IsShown() then HideUIPanel(SettingsPanel) end
-        if InterfaceOptionsFrame and InterfaceOptionsFrame:IsShown() then HideUIPanel(InterfaceOptionsFrame) end
-        if GameMenuFrame and GameMenuFrame:IsShown() then HideUIPanel(GameMenuFrame) end
+        -- Blizzard's panels are only closed out of combat
+        if not InCombatLockdown() then
+            if SettingsPanel and SettingsPanel:IsShown() then HideUIPanel(SettingsPanel) end
+            if GameMenuFrame and GameMenuFrame:IsShown() then HideUIPanel(GameMenuFrame) end
+        end
         LFW:Open("options")
     end)
     if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
         local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
         Settings.RegisterAddOnCategory(category)
-    elseif InterfaceOptions_AddCategory then
-        InterfaceOptions_AddCategory(panel)
     end
 end
 

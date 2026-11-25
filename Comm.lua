@@ -1,3 +1,4 @@
+local addonName, ns = ...
 -- Comm.lua
 -- Sharing profession data with guild members who also use Looking For Work.
 --
@@ -36,7 +37,6 @@
 -- "Ignore Queries" (Options) stops you (all your characters) from answering Q messages and
 -- from sharing automatically; it still receives what others send.
 
-local ADDON_NAME, ns = ...
 local LFW = ns.LFW
 
 local AceComm    = LibStub("AceComm-3.0")
@@ -78,7 +78,22 @@ LFW.pendingData     = {}   -- guid -> true (my characters to send soon)
 LFW.pendingRequests = {}   -- profKey -> member short id to ask for its recipe list
 LFW.lastRequested   = {}   -- profKey -> { t = time, n = size advertised } when I last asked
 
-local function MyId() return ns.ShortId(UnitGUID("player")) end
+-- Messages name players by their whole GUID (versions before 1.7.0 sent
+-- only its last part; those are still understood when reading)
+local function MyId() return ns.MyGuid() end
+
+-- Is this id (a whole GUID, or the last part from an older version) me?
+local function IsMyId(id)
+    local guid = ns.MyGuid()
+    return id ~= nil and guid ~= nil and (id == guid or id == ns.ShortId(guid))
+end
+
+-- What an Update request says the asker has for this player
+local function HaveFor(have, guid)
+    local v = have[guid]
+    if v == nil then v = have[ns.ShortId(guid)] end
+    return v
+end
 
 -------------------------------------------------------------------------------
 -- Sending
@@ -267,7 +282,7 @@ function LFW:RequestUpdate()
 
     local have = {}
     for guid, rec in pairs(self.db.players) do
-        if not rec.mine and rec.guild == self.guildKey then have[ns.ShortId(guid)] = rec.rev or 0 end
+        if not rec.mine and rec.guild == self.guildKey then have[guid] = rec.rev or 0 end
     end
     local x, nx = {}, 0              -- collected data I already have, per collector
     for obs, rev in pairs(self.db.sync.collectSeen) do
@@ -379,7 +394,7 @@ end
 -- Data arrived from a member: ask them for any recipe list I'm missing.
 -- theirCounts: the sender's recipe list sizes (nil from older versions)
 function LFW:CheckMissingCatalogs(chars, theirCounts, from)
-    if type(from) ~= "string" or #from > 20 then return end
+    if type(from) ~= "string" or #from > 64 then return end
     theirCounts = type(theirCounts) == "table" and theirCounts or {}
     for _, rec in ipairs(chars) do
         for key, prof in pairs(rec.profs) do
@@ -417,7 +432,7 @@ function LFW:HandleRequest(msg)
     for i, key in ipairs(msg.p) do
         if i > #ns.PROFESSIONS then break end
         if ns.PROF_BY_KEY[key] then
-            if msg.to == ns.ShortId(UnitGUID("player")) then
+            if IsMyId(msg.to) then
                 if not self.db.settings.ignoreQueries and self:CatalogScore(key) > 0 then
                     self:ScheduleCatalog(key, true, msg.z == 1)
                 end
@@ -503,7 +518,7 @@ function LFW:HandleQuery(msg)
     local any = false
     for guid, rec in pairs(self.db.players) do
         if rec.mine and rec.guild == self.guildKey then
-            if have[ns.ShortId(guid)] ~= rec.rev then
+            if HaveFor(have, guid) ~= rec.rev then
                 self.pendingData[guid] = true
                 any = true
             end
@@ -536,7 +551,7 @@ end
 
 function LFW:HandleData(msg)
     if not self.guildKey or type(msg.ch) ~= "table" then return end
-    local myGuid, roster = UnitGUID("player"), ns.roster
+    local myGuid, roster = ns.MyGuid(), ns.roster
     local changed, received = false, {}
     for i, c in ipairs(msg.ch) do
         if i > MAX_CHARS_PER_MSG then break end
@@ -662,7 +677,7 @@ local function PackSeen(rec, since, me)
         end
     end
     if not any then return nil end
-    return { id = rec.guid, n = rec.name, rl = rec.realm, c = rec.class, g = rec.gname, gn = rec.gnone and 1 or nil,
+    return { id = rec.guid, n = rec.name, c = rec.class, g = rec.gname, gn = rec.gnone and 1 or nil,
              gt = rec.gt, rs = rec.rs, fa = rec.fa, p = p }
 end
 
@@ -741,7 +756,7 @@ function LFW:HandleSeen(msg)
     for i, e in ipairs(msg.e) do
         if i > SEEN_PER_MSG * 2 then break end
         local guid = type(e) == "table" and e.id
-        local mine = guid and (guid == UnitGUID("player") or (self.db.players[guid] and self.db.players[guid].mine))
+        local mine = guid and (guid == ns.MyGuid() or (self.db.players[guid] and self.db.players[guid].mine))
         -- only people outside my guild: guild members come from their own addon
         -- or the guild directory
         if ns.ValidGuid(guid) and not mine and not self:InMyGuild(guid) and type(e.p) == "table" then
@@ -785,7 +800,7 @@ function LFW:HandleSeen(msg)
             end
             if accepted then
                 local class = type(e.c) == "string" and e.c:match("^%u+$") and #e.c < 20 and e.c or nil
-                self:SetSeenIdentity(rec, CleanText(e.n), CleanText(e.rl, 40), class)
+                self:SetSeenIdentity(rec, CleanText(e.n), nil, class)
                 if not rec.gt or (gt and gt >= rec.gt) then
                     if e.g then rec.gname, rec.gnone = CleanText(e.g, 60), nil
                     elseif e.gn == 1 then rec.gname, rec.gnone = nil, true end
@@ -833,7 +848,7 @@ function LFW:OnCommReceived(prefix, data, distribution, sender)
         end
         return
     end
-    if msg.from == MyId() then return end     -- my own message coming back
+    if IsMyId(msg.from) then return end      -- my own message coming back
 
     local handler = (msg.t == "Q" and self.HandleQuery)
         or (msg.t == "D" and self.HandleData)

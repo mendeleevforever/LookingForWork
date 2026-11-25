@@ -1,3 +1,4 @@
+local addonName, ns = ...
 -- Collect.lua
 -- Profession data about people who DON'T run Looking For Work ("collected"
 -- data, kept in LookingForWorkDB.seen, separate from what members share):
@@ -26,12 +27,10 @@
 -- (Comm.lua "X" messages); data about guild members isn't, because each
 -- member's own addon or the guild directory is the better source.
 
-local ADDON_NAME, ns = ...
 local LFW = ns.LFW
 
 -- How each entry was obtained
 LFW.recentLinks = {}      -- profession links clicked lately (newest last)
-local eventFrame = CreateFrame("Frame")   -- this file's events (see Setup)
 
 local SOURCES = {
     link      = "profession link",          -- a link that was opened: full recipe list
@@ -64,12 +63,13 @@ function LFW:GetSeen(guid, create)
     return rec
 end
 
--- Name, realm and class from the game, when it knows them
+-- Name, class and race from the game, when it knows them (its realm field is
+-- blank on WoW Forever and isn't used)
 local function PlayerInfo(guid)
     if not GetPlayerInfoByGUID then return nil end
-    local ok, _, class, _, race, _, name, realm = pcall(GetPlayerInfoByGUID, guid)
-    if not ok or Secret(name) then return nil end
-    return name, realm, class, race
+    local ok, _, class, _, race, _, name = pcall(GetPlayerInfoByGUID, guid)
+    if not ok or Secret(name) or Secret(class) or Secret(race) then return nil end
+    return name, nil, class, race
 end
 
 -------------------------------------------------------------------------------
@@ -86,52 +86,28 @@ local RACE_FACTION = {
     BloodElf = "Horde", Goblin = "Horde",
 }
 
--- The ruleset of the realm I'm on: Hardcore, RP, PvP, otherwise PvE
-local function DetectRuleset()
-    if not (C_GameRules and C_GameRules.IsGameRuleActive and Enum and Enum.GameRule) then return nil end
-    local function on(rule)
-        if rule == nil then return false end
-        local ok, active = pcall(C_GameRules.IsGameRuleActive, rule)
-        return ok and active and true or false
-    end
-    local g = Enum.GameRule
-    if on(g.HardcoreRuleset) then return "Hardcore" end
-    if on(g.RPRuleset) then return "RP" end
-    if on(g.PvPRuleset) then return "PvP" end
-    return "PvE"
-end
-
 local myContext
--- { rs = "PvP", fa = "Alliance" } for the character I'm logged in on
+-- { rs = "PvE", fa = "Alliance" } for the character I'm logged in on: the
+-- ruleset from GetRuleset (Core.lua), the faction from UnitFactionGroup
 function LFW:MyContext()
     if not myContext or not myContext.rs or not myContext.fa then
-        myContext = { rs = ns.Ruleset and ns.Ruleset() or DetectRuleset(), fa = UnitFactionGroup and UnitFactionGroup("player") }
-        if not FACTIONS[myContext.fa] then myContext.fa = nil end
+        local fa = UnitFactionGroup("player")
+        if Secret(fa) or not FACTIONS[fa] then fa = nil end
+        myContext = { rs = ns.GetRuleset(), fa = fa }
     end
     return myContext
 end
 
-local function ServerOf(guid)
-    return type(guid) == "string" and guid:match("^Player%-(%d+)%-") or nil
-end
-
--- Remember which ruleset each server belongs to (learned from my characters)
-function LFW:LearnRealmRuleset()
-    local ctx = self:MyContext()
-    local server = ServerOf(UnitGUID("player"))
-    if ctx.rs and server then self.db.realmRules[server] = ctx.rs end
-end
-
--- The ruleset and faction a collected person plays on (nil when unknown)
+-- The ruleset and faction a collected person plays on (nil when unknown).
+-- Both are recorded when they're seen; nothing is worked out from their GUID.
 function LFW:ContextOf(rec)
-    local rs = rec.rs or self.db.realmRules[ServerOf(rec.guid) or ""]
     local fa = rec.fa
     if not fa then
         local _, _, _, race = PlayerInfo(rec.guid)
         fa = race and RACE_FACTION[race]
         if fa then rec.fa = fa end
     end
-    return rs, fa
+    return rec.rs, fa
 end
 
 -- Can the character I'm logged in on trade and craft with this person?
@@ -155,32 +131,11 @@ function LFW:TagContext(rec, unitFaction)
     rec.fa = fa or rec.fa
 end
 
--- Split "First Last-Realm" into name and realm, only when it really is a realm
--- (so a hyphenated last name like "Smith-Jones" is never cut):
---   * my own realm, or the realm the game reports for that GUID
---   * otherwise, for someone from another server, a last part without spaces
-local function SplitRealm(full, knownRealm, guid)
-    if type(full) ~= "string" then return nil end
-    local name = ns.StripRealm(full)
-    if not name then return nil end
-    if name ~= full then return name, nil end                 -- it was my realm
-    local candidates = {}
-    if type(knownRealm) == "string" and knownRealm ~= "" then
-        candidates[1] = knownRealm
-        candidates[2] = (knownRealm:gsub("[%s%-']", ""))
-    end
-    for _, realm in ipairs(candidates) do
-        local suffix = "-" .. realm
-        if #full > #suffix and full:sub(-#suffix):lower() == suffix:lower() then
-            return ns.CleanName(full:sub(1, -#suffix - 1)), realm
-        end
-    end
-    local myServer = ServerOf(UnitGUID("player"))
-    if guid and ServerOf(guid) and ServerOf(guid) ~= myServer then
-        local base, realm = full:match("^(.+)%-([^%s%-]+)$")
-        if base then return ns.CleanName(base), realm end
-    end
-    return ns.CleanName(full), nil
+-- A clean "First Last" from a name the game gave (an internal server label on
+-- the end is removed). WoW Forever has no realms, so none is kept.
+local function SplitRealm(full)
+    if type(full) ~= "string" or Secret(full) then return nil end
+    return ns.StripRealm(full), nil
 end
 
 -- Do two names belong to the same person? Equal, or one is only a first
@@ -202,11 +157,7 @@ ns.SameName = SameName
 function LFW:SetSeenIdentity(rec, name, realm, class, authoritative)
     name = ns.CleanName(name)
     if name and (authoritative or not rec.name or #name >= #rec.name or not rec.name:find(" ", 1, true)) then rec.name = name end
-    -- a real realm name only; WoW Forever's internal server labels aren't kept
-    if type(realm) == "string" and realm ~= "" and not ns.IsServerLabel(realm) then
-        local mine = GetNormalizedRealmName and GetNormalizedRealmName()
-        if realm ~= mine and realm ~= GetRealmName() then rec.realm = realm end
-    end
+    -- (realm: WoW Forever has none, so it isn't kept)
     if type(class) == "string" and class:match("^%u+$") then rec.class = class end
     local m = ns.roster.byGuid[rec.guid]
     if m then
@@ -231,7 +182,7 @@ function LFW:NoteObservation(rec, p)
 end
 
 local function IsMyCharacter(self, guid)
-    if guid == UnitGUID("player") then return true end
+    if guid ~= nil and guid == ns.MyGuid() then return true end
     local own = self.db.players[guid]
     return own and own.mine or false
 end
@@ -336,8 +287,9 @@ local function WindowOwner(self, linkedName, prof)
 end
 
 function LFW:StoreObservedProfession(linkedName, prof, known, lvl, max, isGuildMember)
+    if Secret(linkedName) then linkedName = nil end
     local guid, link, ownerName = WindowOwner(self, linkedName, prof)
-    if not ns.ValidGuid(guid) or guid == UnitGUID("player") then
+    if not ns.ValidGuid(guid) or guid == ns.MyGuid() then
         if linkedName then self:Debug(("Couldn't tell who %s's window belongs to; not saved."):format(tostring(linkedName))) end
         return
     end
@@ -462,7 +414,8 @@ end
 
 -- Their guild, when I target or mouse over someone I have collected data for
 function LFW:CheckUnitGuild(unit)
-    if not UnitExists(unit) or not UnitIsPlayer(unit) then return end
+    local exists, isPlayer = UnitExists(unit), UnitIsPlayer(unit)
+    if Secret(exists) or Secret(isPlayer) or not exists or not isPlayer then return end
     local guid = UnitGUID(unit)
     if not guid or Secret(guid) then return end
     local rec = self.db.seen[guid]
@@ -470,9 +423,11 @@ function LFW:CheckUnitGuild(unit)
     local gname = GetGuildInfo(unit)
     if Secret(gname) then return end
     self:SetGuildOf(guid, gname)
-    self:TagContext(rec, UnitFactionGroup and UnitFactionGroup(unit))
+    local fa = UnitFactionGroup(unit)
+    self:TagContext(rec, (not Secret(fa)) and fa or nil)
     local name = ns.NameFromUnit(unit)
-    if name then self:SetSeenIdentity(rec, name, nil, select(2, UnitClass(unit))) end
+    local _, class = UnitClass(unit)
+    if name then self:SetSeenIdentity(rec, name, nil, (not Secret(class)) and class or nil) end
 end
 
 -------------------------------------------------------------------------------
@@ -491,6 +446,7 @@ local WHO_GAP     = 6      -- the server only answers one /who every few seconds
 -- Record someone's guild (nil = no guild) and when it was checked. A change is
 -- shared with guild mates like any other observation of mine.
 function LFW:SetGuildOf(guid, gname)
+    if Secret(gname) then return end
     gname = (type(gname) == "string" and gname ~= "") and gname or nil
     local rec = self.db.seen[guid]
     if not rec then
@@ -529,7 +485,8 @@ function LFW:LookupGuildOf(guid)
     -- 1. near me: read it straight from their unit
     if UnitTokenFromGUID then
         local ok, unit = pcall(UnitTokenFromGUID, guid)
-        if ok and type(unit) == "string" and not Secret(unit) and UnitExists(unit) then
+        local exists = ok and type(unit) == "string" and not Secret(unit) and UnitExists(unit)
+        if exists and not Secret(exists) then
             local gname = GetGuildInfo(unit)
             if not Secret(gname) then
                 self:SetGuildOf(guid, gname)
@@ -578,7 +535,7 @@ local function WhoListeners()
         local ok, list = pcall(function() return { GetFramesRegisteredForEvent("WHO_LIST_UPDATE") } end)
         if ok then
             for _, f in ipairs(list) do
-                if f ~= eventFrame and type(f) == "table" then out[#out + 1] = f end
+                if f ~= ns.eventFrame and type(f) == "table" then out[#out + 1] = f end
             end
         end
     end
@@ -755,28 +712,24 @@ end
 -------------------------------------------------------------------------------
 -- Setup
 -------------------------------------------------------------------------------
-local frame = eventFrame
-frame:SetScript("OnEvent", function(_, event, ...)
-    if not LFW.db then return end
-    if CHAT_EVENTS[event] ~= nil then
+-- this file's events, in the addon's one event table (Core.lua)
+for event in pairs(CHAT_EVENTS) do
+    ns.On(event, function(...)
         local ok, err = pcall(LFW.OnChatMessage, LFW, event, ...)
         if not ok then LFW:Debug("chat link: " .. tostring(err)) end
-    elseif event == "GUILD_TRADESKILL_UPDATE" then
-        if LFW.readingDirectory or (LFW.dirReadAt and GetTime() - LFW.dirReadAt < 2) then return end
-        if LFW.dirReadTimer then LFW.dirReadTimer:Cancel() end
-        LFW.dirReadTimer = C_Timer.NewTimer(1, function() LFW.dirReadTimer = nil; LFW:ReadGuildDirectory() end)
-    elseif event == "WHO_LIST_UPDATE" then
-        LFW:OnWhoResults()
-    elseif event == "UPDATE_MOUSEOVER_UNIT" then
-        LFW:CheckUnitGuild("mouseover")
-    elseif event == "PLAYER_TARGET_CHANGED" then
-        LFW:CheckUnitGuild("target")
-    end
+    end)
+end
+ns.On("GUILD_TRADESKILL_UPDATE", function()
+    if LFW.readingDirectory or (LFW.dirReadAt and GetTime() - LFW.dirReadAt < 2) then return end
+    if LFW.dirReadTimer then LFW.dirReadTimer:Cancel() end
+    LFW.dirReadTimer = C_Timer.NewTimer(1, function() LFW.dirReadTimer = nil; LFW:ReadGuildDirectory() end)
 end)
+ns.On("WHO_LIST_UPDATE", function() LFW:OnWhoResults() end)
+ns.On("UPDATE_MOUSEOVER_UNIT", function() LFW:CheckUnitGuild("mouseover") end)
+ns.On("PLAYER_TARGET_CHANGED", function() LFW:CheckUnitGuild("target") end)
 
 function LFW:InitCollect()
     myContext = nil
-    self:LearnRealmRuleset()
     -- my own earlier observations without a ruleset/faction: if I made them on
     -- this character, they share its ruleset and faction
     local me = ns.NameFromUnit("player")
@@ -790,11 +743,6 @@ function LFW:InitCollect()
                 end
             end
         end
-    end
-    for event in pairs(CHAT_EVENTS) do pcall(frame.RegisterEvent, frame, event) end
-    for _, event in ipairs({ "GUILD_TRADESKILL_UPDATE",
-                             "UPDATE_MOUSEOVER_UNIT", "PLAYER_TARGET_CHANGED", "WHO_LIST_UPDATE" }) do
-        pcall(frame.RegisterEvent, frame, event)
     end
     -- remember which profession link was clicked, so the window it opens can
     -- be matched to the right person (by GUID, not by name)

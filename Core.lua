@@ -1,3 +1,4 @@
+local addonName, ns = ...
 -- Core.lua
 -- Looking For Work: collects profession data (every recipe of every profession
 -- plus which recipes each character knows) and keeps it in LookingForWorkDB.
@@ -9,15 +10,15 @@
 --     GUILD addon channel (see Comm.lua). The window lives in UI.lua.
 --
 -- WoW Forever names are "First-name Last-name", so names can contain spaces.
--- Players are stored by GUID, which is reliable no matter how a name is shown.
-
-local ADDON_NAME, ns = ...
+-- Players are stored by their whole GUID (never parsed: no realm or layer is
+-- read from it). Whether a player GUID stays the same across sessions on
+-- WoW Forever isn't verified yet.
 
 local LFW = {}
 ns.LFW = LFW
 _G.LookingForWork = LFW
 
-LFW.VERSION = "1.6.2"
+LFW.VERSION = "1.7.0"
 LFW.PREFIX  = "|cffe6b422Looking For Work:|r "
 
 local T = C_TradeSkillUI
@@ -85,6 +86,20 @@ ns.PackList = PackList
 
 local function tbl(v) return type(v) == "table" and v or {} end
 
+-- Values from unit and chat APIs can be "secret" (Midnight's addon rules):
+-- they can't be compared, branched on, concatenated or printed. Check first.
+local function IsSecret(v)
+    return issecretvalue ~= nil and v ~= nil and issecretvalue(v) or false
+end
+ns.IsSecret = IsSecret
+
+-- My character's whole GUID (nil if the game won't say)
+function ns.MyGuid()
+    local guid = UnitGUID("player")
+    if guid == nil or IsSecret(guid) then return nil end
+    return guid
+end
+
 -- Tidy a player name: trim, collapse runs of spaces into one.
 local function CleanName(name)
     if type(name) ~= "string" then return nil end
@@ -112,22 +127,12 @@ ns.IsServerLabel = IsServerLabel
 
 -- Remove a "-Realm" suffix, but only when it really is a realm name, so a
 -- hyphenated last name (e.g. "Anna Smith-Jones") is never cut.
-local function StripRealm(name, server)
+-- (WoW Forever has no realms; realm names come back empty, so they're never
+-- used. Only the labels above are removed.)
+local function StripRealm(name)
     name = CleanName(name)
     if not name then return nil end
-    local realms = {}
-    if type(server) == "string" and server ~= "" then realms[#realms + 1] = server end
-    if GetRealmName then realms[#realms + 1] = GetRealmName() end
-    if GetNormalizedRealmName then realms[#realms + 1] = GetNormalizedRealmName() end
-    for _, realm in ipairs(realms) do
-        if type(realm) == "string" and realm ~= "" then
-            local suffix = ("-" .. realm):lower()
-            if #name > #suffix and name:sub(-#suffix):lower() == suffix then
-                return CleanName(name:sub(1, -#suffix - 1))
-            end
-        end
-    end
-    -- any internal server label ("Bugs Frosty-CAMWOWUS1Realm5PvE" -> "Bugs Frosty")
+    -- an internal server label ("Bugs Frosty-CAMWOWUS1Realm5PvE" -> "Bugs Frosty")
     local base, label = name:match("^(.-)%-([^%-]+)$")
     if base and base ~= "" and IsServerLabel(label) then return CleanName(base) end
     return name
@@ -138,15 +143,18 @@ ns.StripRealm = StripRealm
 -- GetUnitName(unit) returns the complete "First Surname" as one string.
 -- Use both so the surname is always kept.
 local function NameFromUnit(unit)
-    if not unit or not UnitExists(unit) or not UnitIsPlayer(unit) then return nil end
+    if not unit then return nil end
+    local exists, isPlayer = UnitExists(unit), UnitIsPlayer(unit)
+    if IsSecret(exists) or IsSecret(isPlayer) or not exists or not isPlayer then return nil end
     local first, surname = UnitName(unit)
+    if IsSecret(first) or IsSecret(surname) then return nil end
     if not first or first == "" or first == UNKNOWNOBJECT or first == UNKNOWN then return nil end
     if type(surname) == "string" and surname ~= "" then
         return CleanName(first .. " " .. surname)
     end
     if GetUnitName then
         local full = GetUnitName(unit, false)
-        if type(full) == "string" then
+        if type(full) == "string" and not IsSecret(full) then
             if FOREIGN_SERVER_LABEL and FOREIGN_SERVER_LABEL ~= "" then
                 local label = FOREIGN_SERVER_LABEL
                 if full:sub(-#label) == label then full = full:sub(1, -#label - 1) end
@@ -189,14 +197,15 @@ function ns.FormatDate(t)
     return date("%b %d, %Y", t)
 end
 
--- The unique part of a player GUID ("Player-1234-0ABCDEF1" -> "0ABCDEF1")
+-- The last part of a player GUID. Only used to read requests from versions
+-- before 1.7.0, which sent that instead of the whole GUID.
 function ns.ShortId(guid)
     if type(guid) ~= "string" then return nil end
     return guid:match("%-(%x+)$") or guid
 end
 
 function ns.ValidGuid(guid)
-    return type(guid) == "string" and #guid < 40 and guid:match("^Player%-%d+%-%x+$") ~= nil
+    return type(guid) == "string" and #guid < 64 and guid:match("^Player%-[%w]+%-[%w]+$") ~= nil
 end
 
 function ns.CountKeys(t)
@@ -298,74 +307,88 @@ end
 -- Game data helpers (spells, items)
 -------------------------------------------------------------------------------
 function ns.SpellName(id)
-    if C_Spell and C_Spell.GetSpellName then
-        local n = SafeCall(C_Spell.GetSpellName, id)
-        if n then return n end
-    end
-    if GetSpellInfo then return (SafeCall(GetSpellInfo, id)) end
+    if not id or not (C_Spell and C_Spell.GetSpellName) then return nil end
+    local n = SafeCall(C_Spell.GetSpellName, id)
+    if IsSecret(n) then return nil end
+    return n
 end
 
 function ns.SpellIcon(id)
-    if C_Spell and C_Spell.GetSpellTexture then
-        local t = SafeCall(C_Spell.GetSpellTexture, id)
-        if t then return t end
-    end
-    if GetSpellTexture then return (SafeCall(GetSpellTexture, id)) end
+    if not id or not (C_Spell and C_Spell.GetSpellTexture) then return nil end
+    return (SafeCall(C_Spell.GetSpellTexture, id))
 end
 
 function ns.ItemName(id)
-    if not id then return nil end
-    if C_Item and C_Item.GetItemNameByID then
-        local n = SafeCall(C_Item.GetItemNameByID, id)
-        if n then return n end
-    end
-    local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
-    return (SafeCall(getInfo, id))
+    if not id or not C_Item then return nil end
+    local n
+    if C_Item.GetItemNameByID then n = SafeCall(C_Item.GetItemNameByID, id) end
+    if not n and C_Item.GetItemInfo then n = (SafeCall(C_Item.GetItemInfo, id)) end
+    if IsSecret(n) then return nil end
+    return n
 end
 
 function ns.ItemIcon(id)
-    if not id then return nil end
-    if C_Item and C_Item.GetItemIconByID then
-        local t = SafeCall(C_Item.GetItemIconByID, id)
-        if t then return t end
-    end
-    if GetItemIcon then return (SafeCall(GetItemIcon, id)) end
+    if not id or not (C_Item and C_Item.GetItemIconByID) then return nil end
+    return (SafeCall(C_Item.GetItemIconByID, id))
 end
 
 function ns.ItemLink(id)
-    local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
-    local _, link = SafeCall(getInfo, id)
+    if not id or not (C_Item and C_Item.GetItemInfo) then return nil end
+    local _, link = SafeCall(C_Item.GetItemInfo, id)
     return link
 end
 
 function ns.ItemQualityHex(id)
     local q
     if C_Item and C_Item.GetItemQualityByID then q = SafeCall(C_Item.GetItemQualityByID, id) end
-    local c = q and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+    local c = q and not IsSecret(q) and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
     if c and c.hex then return c.hex end
     return "|cffffffff"
 end
 
 function ns.ItemCount(id)
-    if C_Item and C_Item.GetItemCount then
-        local n = SafeCall(C_Item.GetItemCount, id, true, false, true)
-        if n then return n end
-    end
-    if GetItemCount then return SafeCall(GetItemCount, id, true) or 0 end
-    return 0
+    if not id or not (C_Item and C_Item.GetItemCount) then return 0 end
+    return SafeCall(C_Item.GetItemCount, id, true, false, true) or 0
 end
+
+-- Item and spell data arrive later than they're asked for: request the load
+-- and run the callbacks on ITEM_DATA_LOAD_RESULT / SPELL_DATA_LOAD_RESULT
+-- (handled in the event table at the bottom of this file)
+local itemWaiters, spellWaiters = {}, {}
+ns.itemWaiters, ns.spellWaiters = itemWaiters, spellWaiters
 
 -- Calls cb() once the item's data is in the client cache
 function ns.LoadItem(id, cb)
-    if not id then return end
-    if ns.ItemName(id) then return end
-    if Item and Item.CreateFromItemID then
-        local ok, item = pcall(Item.CreateFromItemID, Item, id)
-        if ok and item and item.ContinueOnItemLoad then
-            pcall(item.ContinueOnItemLoad, item, cb)
-        end
+    if not id or ns.ItemName(id) then return end
+    local list = itemWaiters[id]
+    if not list then
+        list = {}
+        itemWaiters[id] = list
+        if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
     end
+    if cb then list[#list + 1] = cb end
 end
+
+-- Calls cb() once the spell's data is in the client cache
+function ns.LoadSpell(id, cb)
+    if not id then return end
+    local list = spellWaiters[id]
+    if not list then
+        list = {}
+        spellWaiters[id] = list
+        if C_Spell and C_Spell.RequestLoadSpellData then pcall(C_Spell.RequestLoadSpellData, id) end
+    end
+    if cb then list[#list + 1] = cb end
+end
+
+local function RunWaiters(waiters, id)
+    local list = waiters[id]
+    if not list then return end
+    waiters[id] = nil
+    for _, cb in ipairs(list) do pcall(cb) end
+end
+ns.RunItemWaiters = function(id) RunWaiters(itemWaiters, id) end
+ns.RunSpellWaiters = function(id) RunWaiters(spellWaiters, id) end
 
 -------------------------------------------------------------------------------
 -- Tooltip text, so search can find recipes by what they do
@@ -432,12 +455,9 @@ end
 local function SpellReady(id)
     if not (C_Spell and C_Spell.IsSpellDataCached) then return true end
     if SafeCall(C_Spell.IsSpellDataCached, id) then return true end
-    if not tipPending[id] and Spell and Spell.CreateFromSpellID then
+    if not tipPending[id] then
         tipPending[id] = true
-        local ok, spell = pcall(Spell.CreateFromSpellID, Spell, id)
-        if ok and spell and spell.ContinueOnSpellLoad then
-            pcall(spell.ContinueOnSpellLoad, spell, function() TooltipLoaded(id) end)
-        end
+        ns.LoadSpell(id, function() TooltipLoaded(id) end)
     end
     return false
 end
@@ -451,22 +471,17 @@ local function Secret(v)
 end
 
 local function ItemEffectText(recipeID, itemID)
-    local getSpell = (C_Item and C_Item.GetItemSpell) or GetItemSpell
-    local _, spellID = SafeCall(getSpell, itemID)
-    if not spellID then return "" end                       -- no "Use:" effect
-    local getDesc = (C_Spell and C_Spell.GetSpellDescription) or GetSpellDescription
-    local desc = SafeCall(getDesc, spellID)
+    local _, spellID = SafeCall(C_Item and C_Item.GetItemSpell, itemID)
+    if not spellID or Secret(spellID) then return "" end    -- no "Use:" effect
+    local desc = SafeCall(C_Spell and C_Spell.GetSpellDescription, spellID)
     if type(desc) == "string" and desc ~= "" and not Secret(desc) then return desc end
     local key = "effect" .. spellID
-    if not tipPending[key] and Spell and Spell.CreateFromSpellID then
+    if not tipPending[key] then
         tipPending[key] = true
-        local ok, spell = pcall(Spell.CreateFromSpellID, Spell, spellID)
-        if ok and spell and spell.ContinueOnSpellLoad then
-            pcall(spell.ContinueOnSpellLoad, spell, function()
-                tipPending[key] = nil
-                TooltipLoaded(recipeID)
-            end)
-        end
+        ns.LoadSpell(spellID, function()
+            tipPending[key] = nil
+            TooltipLoaded(recipeID)
+        end)
     end
     return nil
 end
@@ -570,30 +585,24 @@ local function IsPriceTable(t)
 end
 
 local priceDB, priceDBTime = nil, 0
+-- Auctionator's price table for where I'm playing: its live database, or the
+-- one plain table in its saved data (Auctionator keeps the current one as a
+-- plain table while you play; others are packed strings). Realm names aren't
+-- used: WoW Forever gives addons none.
 local function FindPriceDB()
     if Auctionator and type(Auctionator.Database) == "table" and IsPriceTable(Auctionator.Database.db) then
         return Auctionator.Database.db
     end
     local root = AUCTIONATOR_PRICE_DATABASE
     if type(root) ~= "table" then return nil end
-    local realm   = GetRealmName() or ""
-    local nrealm  = (GetNormalizedRealmName and GetNormalizedRealmName()) or (realm:gsub("[%s%-]", ""))
-    local faction = UnitFactionGroup("player") or ""
-    local candidates = { realm .. " " .. faction, nrealm .. " " .. faction, realm, nrealm, realm .. "-" .. faction }
-    if Auctionator and Auctionator.Variables and Auctionator.Variables.GetConnectedRealmRoot then
-        local ok, r = pcall(Auctionator.Variables.GetConnectedRealmRoot)
-        if ok and type(r) == "string" then table.insert(candidates, 1, r) end
-    end
-    for _, key in ipairs(candidates) do
-        if IsPriceTable(root[key]) then return root[key] end
-    end
-    local lrealm = realm:lower()
-    for key, t in pairs(root) do
-        if type(key) == "string" and lrealm ~= "" and key:lower():find(lrealm, 1, true) and IsPriceTable(t) then
-            return t
+    local found
+    for _, t in pairs(root) do
+        if IsPriceTable(t) then
+            if found then return nil end      -- more than one: can't tell which, use the API only
+            found = t
         end
     end
-    return nil
+    return found
 end
 
 local function PriceDB()
@@ -835,7 +844,8 @@ function LFW:InitDB()
     db.icons      = tbl(db.icons)
     db.skillLines = tbl(db.skillLines)
     db.seen       = tbl(db.seen)
-    db.realmRules = tbl(db.realmRules)      -- [server id] = "PvP" etc., learned from my characters
+    db.realmRules = nil                     -- (removed in 1.7.0: rulesets aren't worked out from realms)
+    db.guildNames = tbl(db.guildNames)      -- [guild key] = guild name, only for showing it
     db.dirChecked = nil      -- recipe questions to the guild directory aren't answered on WoW Forever
     db.sync.collectSeen = tbl(db.sync.collectSeen)
     db.sync.collectRev  = tonumber(db.sync.collectRev) or 0
@@ -904,33 +914,14 @@ function LFW:InitDB()
             if next(rec.profs) == nil then db.seen[guid] = nil end
         end
     end
-    -- Repair (1.5.1): WoW Forever's internal server labels were saved as realms
-    -- (and sometimes in names), which made whispers fail
+    -- WoW Forever has no realms: realm fields aren't kept (1.7.0), and internal
+    -- server labels are removed from saved names (1.5.1)
     for _, list in ipairs({ db.seen, db.players }) do
         for _, rec in pairs(list) do
             if type(rec) == "table" then
-                if IsServerLabel(rec.realm) then rec.realm = nil end
+                rec.realm = nil
                 if type(rec.name) == "string" then rec.name = StripRealm(rec.name) or rec.name end
             end
-        end
-    end
-
-    -- Repair (1.4.1 pre-release): clicking quickly through crafters could save
-    -- one person's window under another person's record, renaming it. Names
-    -- are unique per realm, so two records with the same name on the same
-    -- realm mean one was overwritten; both are removed (they come back the
-    -- next time those people link their profession).
-    local byName = {}
-    for guid, rec in pairs(db.seen) do
-        if not rec.gkey and rec.name then
-            local key = (guid:match("^Player%-(%d+)%-") or "") .. "|" .. rec.name:lower()
-            byName[key] = byName[key] or {}
-            table.insert(byName[key], guid)
-        end
-    end
-    for _, guids in pairs(byName) do
-        if #guids > 1 then
-            for _, guid in ipairs(guids) do db.seen[guid] = nil end
         end
     end
 
@@ -991,29 +982,66 @@ end
 -------------------------------------------------------------------------------
 -- Guild
 -------------------------------------------------------------------------------
--- The ruleset of the realm I'm on: Hardcore, RP, PvP, otherwise PvE (nil when
--- the game doesn't say yet). WoW Forever has one world per ruleset, and since
--- its 2026-11-20 hotfix the game no longer tells addons realm names or IDs.
-local ruleset
-function ns.Ruleset()
-    if ruleset then return ruleset end
-    if not (C_GameRules and C_GameRules.IsGameRuleActive and Enum and Enum.GameRule) then return nil end
-    local function on(rule)
-        if rule == nil then return false end
-        local ok, active = pcall(C_GameRules.IsGameRuleActive, rule)
-        return ok and active and true or false
-    end
-    local g = Enum.GameRule
-    if on(g.HardcoreRuleset) then ruleset = "Hardcore"
-    elseif on(g.RPRuleset) then ruleset = "RP"
-    elseif on(g.PvPRuleset) then ruleset = "PvP"
-    else ruleset = "PvE" end
-    return ruleset
+-- Ruleset and region, read exactly as the WoW Forever addon guidelines say
+-- (WoW Forever has regions and rulesets, no realms).
+local REGION_CODES = { [1] = "US", [2] = "KR", [3] = "EU", [4] = "TW", [5] = "CN" }
+
+local function GetRegion()
+  if C_BattleNet and C_BattleNet.GetGameAccountInfoByGUID then
+    local info = C_BattleNet.GetGameAccountInfoByGUID(UnitGUID("player"))
+    local id = info and info.regionID
+    if id and REGION_CODES[id] then return REGION_CODES[id] end
+  end
+  if GetCurrentRegionName then
+    local name = GetCurrentRegionName()
+    if name and name ~= "" then return name end
+  end
+  if GetCurrentRegion then
+    return REGION_CODES[GetCurrentRegion()] -- nil for unknown IDs; tell the user
+  end
+  return nil
 end
 
--- The ruleset named in a guild key from before 1.6.2 ("CAMWOWUS2Realm5PvE|..."),
--- or nil when it doesn't say
-local function KeyRuleset(prefix)
+local function GetRuleset()
+  if not (C_GameRules and C_GameRules.IsGameRuleActive and Enum and Enum.GameRule) then
+    return nil -- API missing on this build; tell the user
+  end
+  local function active(name)
+    local id = Enum.GameRule[name]
+    return id ~= nil and C_GameRules.IsGameRuleActive(id)
+  end
+  if active("HardcoreRuleset") then return "Hardcore" end
+  if active("RPRuleset") then return "RP" end
+  if active("PvPRuleset") then return "PvP" end
+  return "PvE"
+end
+
+ns.GetRegion = function()
+    local ok, r = pcall(GetRegion)
+    return ok and r or nil
+end
+ns.GetRuleset = function()
+    local ok, r = pcall(GetRuleset)
+    return ok and r or nil
+end
+
+-- My guild's key: region + guild club ID ("US-503726411"). Guild data is
+-- never keyed by guild name. The club ID can be nil until guild data loads
+-- after login; then there's no key yet and it's read again on
+-- PLAYER_GUILD_UPDATE / GUILD_ROSTER_UPDATE (a nil is never cached).
+local function GuildKeyNow()
+    if not (C_Club and C_Club.GetGuildClubId) then return nil end
+    local ok, clubId = pcall(C_Club.GetGuildClubId)
+    if not ok or clubId == nil or IsSecret(clubId) then return nil end
+    return (ns.GetRegion() or "?") .. "-" .. tostring(clubId)
+end
+
+-- Data saved under this guild's older keys moves to the current key:
+--   * "Realm|Guild Name" (before 1.6.2) and "Ruleset|Guild Name" (1.6.2),
+--     matched by the guild's name once, unless the old key names a different
+--     ruleset (e.g. "...PvP|..." while playing PvE)
+--   * "?-<club ID>" saved while the region wasn't known yet
+local function OldKeyRuleset(prefix)
     if type(prefix) ~= "string" then return nil end
     if prefix:find("Hardcore", 1, true) then return "Hardcore" end
     if prefix:find("PvP", 1, true) then return "PvP" end
@@ -1022,20 +1050,25 @@ local function KeyRuleset(prefix)
     return nil
 end
 
--- Guild data saved under an older key of this guild (built from a realm name
--- the game no longer gives, or before the ruleset was known) moves to the
--- current key. Keys from a different ruleset are left alone.
 function LFW:MigrateGuildKeys(key, guildName)
-    local rs = ns.Ruleset()
+    local rs = ns.GetRuleset()
+    local clubPart = key:match("%-(.+)$")
     local moved = 0
     local function convert(old)
         if type(old) ~= "string" or old == key then return nil end
         local prefix, name = old:match("^(.-)|(.+)$")
-        if name ~= guildName then return nil end
-        local oldRs = KeyRuleset(prefix)
-        if oldRs and rs and oldRs ~= rs then return nil end
-        moved = moved + 1
-        return key
+        if name then
+            if name ~= guildName then return nil end
+            local oldRs = OldKeyRuleset(prefix)
+            if oldRs and rs and oldRs ~= rs then return nil end
+            moved = moved + 1
+            return key
+        end
+        if clubPart and old:match("%-(.+)$") == clubPart then
+            moved = moved + 1
+            return key
+        end
+        return nil
     end
     for _, rec in pairs(self.db.players) do
         local new = convert(rec.guild)
@@ -1048,21 +1081,26 @@ function LFW:MigrateGuildKeys(key, guildName)
     if moved > 0 then self:Debug(("Moved %d guild records to %s."):format(moved, key)) end
 end
 
--- My guild's key: ruleset + guild name ("PvE|Second Wind"). Realm names
--- aren't used: WoW Forever no longer gives them to addons.
 function LFW:RefreshGuild()
     if not IsInGuild() then
         self.guildKey, self.guildName = nil, nil
         return
     end
     local name = GetGuildInfo("player")
-    if type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then
-        local key = (ns.Ruleset() or "?") .. "|" .. name
-        if key ~= self.guildKey then
-            self.guildKey, self.guildName = key, name
-            self.indexDirty = true
-            if self.db then self:MigrateGuildKeys(key, name) end
-        end
+    if type(name) ~= "string" or name == "" or IsSecret(name) then name = nil end
+    local key = GuildKeyNow()
+    if not key then return end            -- guild data not loaded yet: try again later
+    if name then self.db.guildNames[key] = name end   -- for showing it, never for matching
+    local changed = key ~= self.guildKey
+    if changed then
+        self.guildKey, self.guildName = key, name or self.db.guildNames[key]
+        self.indexDirty = true
+    end
+    -- move older saved keys over (again once the guild's name is known, since
+    -- keys from before 1.7.0 were built from it)
+    if changed or (self.guildName and self.guildName ~= self.migratedFor) then
+        self:MigrateGuildKeys(key, self.guildName)
+        self.migratedFor = self.guildName
     end
 end
 
@@ -1092,9 +1130,10 @@ function LFW:UpdateRoster()
     roster.total, roster.online, roster.loaded = 0, 0, false
     if not IsInGuild() or not GetNumGuildMembers then return end
     local total = GetNumGuildMembers() or 0
-    local myGuid = UnitGUID("player")
+    local myGuid = ns.MyGuid()
     for i = 1, total do
         local name, rank, _, level, _, zone, _, _, online, _, class, _, _, isMobile, _, _, guid = GetGuildRosterInfo(i)
+        if IsSecret(name) or IsSecret(guid) or IsSecret(online) then name = nil end
         if name then
             local clean = StripRealm(name) or name
             local m = {
@@ -1112,13 +1151,21 @@ function LFW:UpdateRoster()
         end
     end
     roster.loaded = roster.total > 0
-    -- changes when someone joins or leaves (not when they log on or off)
-    local sig = roster.total
-    for guid in pairs(roster.byGuid) do
-        sig = (sig + (tonumber(ns.ShortId(guid) or "0", 16) or 0)) % 2147483647
+    -- did someone join or leave (not just log on or off)? whole GUIDs compared
+    local changed = roster.members == nil
+    if roster.members then
+        for guid in pairs(roster.byGuid) do
+            if not roster.members[guid] then changed = true; break end
+        end
+        if not changed then
+            for guid in pairs(roster.members) do
+                if not roster.byGuid[guid] then changed = true; break end
+            end
+        end
     end
-    roster.membershipChanged = roster.signature ~= nil and roster.signature ~= sig
-    roster.signature = sig
+    roster.membershipChanged = roster.members ~= nil and changed
+    roster.members = {}
+    for guid in pairs(roster.byGuid) do roster.members[guid] = true end
 
     -- Keep stored names / classes in step with the roster
     for guid, rec in pairs(self.db.players) do
@@ -1136,7 +1183,7 @@ function LFW:MemberInfo(rec)
 end
 
 function LFW:IsMe(rec)
-    return rec and rec.guid == UnitGUID("player")
+    return rec and rec.guid ~= nil and rec.guid == ns.MyGuid()
 end
 
 function LFW:IsOnline(rec)
@@ -1158,18 +1205,22 @@ end
 -- My character
 -------------------------------------------------------------------------------
 function LFW:GetMe()
-    local guid = UnitGUID("player")
+    local guid = ns.MyGuid()
     if not guid or not self.db then return nil end
+    local rs, fa, region = ns.GetRuleset(), UnitFactionGroup("player"), ns.GetRegion()
+    if IsSecret(fa) then fa = nil end
     local rec = self.db.players[guid]
     if not rec then
         rec = { guid = guid, profs = {}, rev = 0, updated = time() }
         self.db.players[guid] = rec
         -- the same character saved under another ID (if the game ever gives a
-        -- character a new ID): carry its data over instead of keeping two
+        -- character a new ID): carry its data over instead of keeping two. A
+        -- bare name may not be unique, so ruleset, faction and region must match.
         local myName = NameFromUnit("player")
-        if myName then
+        if myName and rs and fa then
             for oldGuid, old in pairs(self.db.players) do
-                if oldGuid ~= guid and old.mine and old.name and NameKey(old.name) == NameKey(myName) then
+                if oldGuid ~= guid and old.mine and old.name and NameKey(old.name) == NameKey(myName)
+                    and old.rs == rs and old.fa == fa and old.region == region then
                     rec.profs, rec.rev, rec.guild = old.profs, (old.rev or 0) + 1, old.guild
                     self.db.players[oldGuid] = nil
                     break
@@ -1178,9 +1229,10 @@ function LFW:GetMe()
         end
     end
     rec.mine = true
+    rec.rs, rec.fa, rec.region = rs or rec.rs, fa or rec.fa, region or rec.region
     rec.name = NameFromUnit("player") or rec.name
     local _, class = UnitClass("player")
-    rec.class = class or rec.class
+    if not IsSecret(class) then rec.class = class or rec.class end
     if IsInGuild() then
         if self.guildKey then rec.guild = self.guildKey end
     else
@@ -1523,7 +1575,7 @@ end
 
 -- Is this person in my guild right now?
 function LFW:InMyGuild(guid)
-    if guid == UnitGUID("player") then return true end
+    if guid ~= nil and guid == ns.MyGuid() then return true end
     local own = self.db.players[guid]
     if own and own.mine and not self.guildKey then return true end
     if not self.guildKey then return false end
@@ -1692,18 +1744,31 @@ function LFW:ForgetGuildData()
 end
 
 -------------------------------------------------------------------------------
--- Events
+-- Events: the addon's one event frame and its handler table, keyed by event
+-- name. Other files add their handlers with ns.On(event, fn).
 -------------------------------------------------------------------------------
 local events = CreateFrame("Frame")
-local handlers = {}
+ns.eventFrame = events
+local handlers = {}        -- [event] = { fn, ... }
 
-function handlers.ADDON_LOADED(name)
-    if name ~= ADDON_NAME then return end
-    LFW:InitDB()
-    events:UnregisterEvent("ADDON_LOADED")
+function ns.On(event, fn)
+    local list = handlers[event]
+    if not list then
+        list = {}
+        handlers[event] = list
+        pcall(events.RegisterEvent, events, event)
+    end
+    list[#list + 1] = fn
 end
 
-function handlers.PLAYER_LOGIN()
+local core = {}            -- this file's handlers
+
+function core.ADDON_LOADED(name)
+    if name ~= addonName or LFW.db then return end
+    LFW:InitDB()          -- SavedVariables are read here, never at file scope
+end
+
+function core.PLAYER_LOGIN()
     ns.LocalizeProfessions()
     LFW:RefreshGuild()
     LFW:GetMe()
@@ -1724,14 +1789,14 @@ function handlers.PLAYER_LOGIN()
     print(("|cffe6b422Looking For Work %s|r loaded  —  /lfw to find guild crafters"):format(LFW.VERSION))
 end
 
-function handlers.PLAYER_GUILD_UPDATE()
+function core.PLAYER_GUILD_UPDATE()
     LFW:RefreshGuild()
     LFW:GetMe()
     LFW:RequestRoster()
     LFW:DataChanged(false)
 end
 
-function handlers.GUILD_ROSTER_UPDATE()
+function core.GUILD_ROSTER_UPDATE()
     LFW:RefreshGuild()
     LFW:GetMe()
     LFW:UpdateRoster()
@@ -1740,15 +1805,15 @@ function handlers.GUILD_ROSTER_UPDATE()
     if LFW.RequestUIRefresh then LFW:RequestUIRefresh() end
 end
 
-function handlers.TRADE_SKILL_SHOW() LFW:QueueScan(1.0) end
-function handlers.TRADE_SKILL_LIST_UPDATE() LFW:QueueScan(0.8) end
-function handlers.TRADE_SKILL_DATA_SOURCE_CHANGED() LFW:QueueScan(0.8) end
+function core.TRADE_SKILL_SHOW() LFW:QueueScan(1.0) end
+function core.TRADE_SKILL_LIST_UPDATE() LFW:QueueScan(0.8) end
+function core.TRADE_SKILL_DATA_SOURCE_CHANGED() LFW:QueueScan(0.8) end
 
-function handlers.NEW_RECIPE_LEARNED(recipeID)
+function core.NEW_RECIPE_LEARNED(recipeID)
     LFW:OnRecipeLearned(recipeID)
 end
 
-function handlers.SKILL_LINES_CHANGED()
+function core.SKILL_LINES_CHANGED()
     if LFW.skillTimer then LFW.skillTimer:Cancel() end
     LFW.skillTimer = C_Timer.NewTimer(2, function()
         LFW.skillTimer = nil
@@ -1756,24 +1821,32 @@ function handlers.SKILL_LINES_CHANGED()
     end)
 end
 
-function handlers.PLAYER_REGEN_ENABLED()
+function core.PLAYER_REGEN_ENABLED()
     if LFW.FlushCombatQueue then LFW:FlushCombatQueue() end
 end
 
 -- New auction scan data: look up the price table again and refresh the window
-function handlers.AUCTION_HOUSE_CLOSED()
+function core.AUCTION_HOUSE_CLOSED()
     ns.ResetPriceCache()
     if LFW.RequestUIRefresh then LFW:RequestUIRefresh(true) end
 end
 
-function handlers.GET_ITEM_INFO_RECEIVED()
+function core.ITEM_DATA_LOAD_RESULT(itemID, success)
+    if success then ns.RunItemWaiters(itemID) end
     if LFW.RequestUIRefresh then LFW:RequestUIRefresh(true) end
 end
 
-for event in pairs(handlers) do
-    pcall(events.RegisterEvent, events, event)
+function core.SPELL_DATA_LOAD_RESULT(spellID, success)
+    if success then ns.RunSpellWaiters(spellID) end
 end
+
+for event, fn in pairs(core) do ns.On(event, fn) end
 events:SetScript("OnEvent", function(_, event, ...)
-    local h = handlers[event]
-    if h and (event == "ADDON_LOADED" or LFW.db) then h(...) end
+    if event ~= "ADDON_LOADED" and not LFW.db then return end
+    local list = handlers[event]
+    if not list then return end
+    for _, fn in ipairs(list) do
+        local ok, err = pcall(fn, ...)
+        if not ok then LFW:Debug(event .. ": " .. tostring(err)) end
+    end
 end)
